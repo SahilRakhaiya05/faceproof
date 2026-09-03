@@ -44,7 +44,7 @@ consented image
   -> explicit human approval of the exact permalink
   -> RFC 8785 evidence manifest + SHA-256
   -> salted Keccak commitment
-  -> EvidenceRegistry on Base Sepolia
+  -> EvidenceRegistry on local Anvil or Base Sepolia
   -> independent verifier and tamper test
 ```
 
@@ -86,8 +86,10 @@ anchor-eligible evidence.
   free plan currently includes 250 searches per month; no paid search provider
   is required for the demo.
 - A clean, tracked Git checkout whose exact commit is recorded for anchored runs
-- A dedicated testnet-only EVM wallet for blockchain writes
-- Base Sepolia test ETH and a deployed `EvidenceRegistry`
+- For the zero-cost local demo: Foundry (`forge` and `anvil`); no wallet or
+  faucet is needed
+- For a public proof: a dedicated testnet-only EVM wallet, Base Sepolia test
+  ETH, and a deployed `EvidenceRegistry`
 
 Only use an adult volunteer who explicitly consented and controls or authorized
 the public post being searched. Do not use this project to identify strangers,
@@ -134,6 +136,20 @@ Anchoring in the console is intentionally a two-pass operation:
 The second pass consumes another one or two SerpApi credits according to the
 search mode recorded by the reviewed discovery. Closing the console does not
 make an incomplete run successful; inspect the evidence history after restart.
+
+For a complete blockchain demo with no wallet, faucet, or chain API key, use:
+
+```powershell
+uv run faceproof local-demo
+```
+
+This generates a fresh disposable wallet in memory, starts a localhost Anvil
+chain, compiles and deploys `EvidenceRegistry`, pins the deployed bytecode,
+launches the same console, and stops Anvil when the command exits. It requires
+a clean committed checkout and never edits `.env`. Keep the command running
+through discovery, reviewed anchoring, verification, and the tamper test because
+the local chain is intentionally ephemeral. Use Base Sepolia for a public,
+third-party-verifiable submission record.
 
 ### Discover, review, then run the full pipeline
 
@@ -201,6 +217,11 @@ The project uses a minimal, immutable, admin-free Solidity registry. It rejects
 zero or duplicate commitments and stores the first submitter, block timestamp,
 and block number. See [`contracts/README.md`](contracts/README.md) for build,
 test, and deployment instructions.
+
+`faceproof local-demo` supplies a fully real, zero-cost EVM path: a new local
+chain and wallet, contract deployment, signed transaction, receipt/event
+validation, independent registry read-back, and tamper rejection. It is ideal
+for rehearsing or judging functionality, but it is not a durable public record.
 
 Recommended public deployment:
 

@@ -1,7 +1,8 @@
 # FaceProof setup and live demo
 
-This is the shortest submission-grade path. It uses one free-tier search API
-and Base Sepolia test ETH. No Gemini or paid face-search account is required.
+This is the shortest submission-grade path. It uses one free-tier search API.
+The blockchain can be a zero-cost local Anvil chain or Base Sepolia test ETH.
+No Gemini or paid face-search account is required.
 
 Install [Foundry](https://getfoundry.sh/getting-started/installation) before
 the blockchain steps; it supplies `forge`, `cast`, and the local `anvil` node.
@@ -131,7 +132,31 @@ and source, the downloaded matched-image path, and the local similarity versus
 the frozen threshold. A displayed name remains an unverified web search hint;
 it is not a face-model or legal-identity claim.
 
-## 4. Configure Base Sepolia
+## 4A. Zero-cost local blockchain demo
+
+After installing Foundry, one command supplies every blockchain value without
+editing `.env`, creating a wallet, or visiting a faucet:
+
+```powershell
+uv run faceproof local-demo
+```
+
+FaceProof requires a clean committed checkout, generates a fresh disposable
+wallet and mnemonic in memory, starts Anvil on localhost, compiles and deploys
+`EvidenceRegistry`, pins its runtime code hash, and opens the judge console at
+`http://127.0.0.1:8787`. Keep this command running while you complete Discover,
+Review & prepare anchor, Verify, and Tamper test. Press `Ctrl+C` afterward to
+stop the console and local chain. The command never changes `.env` and the
+ephemeral wallet and chain are not suitable for real funds or durable public
+proof.
+
+Use `--port 8790` if port 8787 is busy, or `--no-open-browser` when you do not
+want it to open a browser automatically.
+
+Live web discovery still needs the free SerpApi key from section 2. For a public
+record that another judge can query later, continue with Base Sepolia below.
+
+## 4B. Configure Base Sepolia
 
 The recommended public record uses Base Sepolia, chain ID `84532`, and the
 free public RPC `https://sepolia.base.org`. Obtain test ETH from the
@@ -239,6 +264,10 @@ sign or rebroadcast a replacement transaction. The journal is removed only
 after the recovered receipt passes an independent chain read-back.
 
 ## Required values
+
+The local blockchain demo needs none of the `FACEPROOF_*` chain values below;
+it creates and injects them only for that process. A public Base Sepolia run
+uses this table:
 
 | Setting | Where it comes from | Cost |
 |---|---|---:|

@@ -512,6 +512,39 @@ def web_console(
     )
 
 
+@app.command("local-demo")
+def local_demo_console(
+    port: int = typer.Option(8787, "--port", min=1024, max=65535),
+    open_browser: bool = typer.Option(
+        True,
+        "--open-browser/--no-open-browser",
+        help="Open the localhost judge console in the default browser.",
+    ),
+) -> None:
+    """Launch the web console with a zero-gas, disposable localhost blockchain."""
+    from .local_demo import LocalDemoError, serve_local_demo
+
+    console.print(
+        Panel.fit(
+            "LOCAL DEMO — ephemeral blockchain rehearsal\n"
+            "Records disappear when this command stops; they are not public-chain proof.",
+            border_style="yellow",
+        )
+    )
+    console.print("No private key or chain setting will be written to .env.")
+    console.print("Live web discovery still uses your configured SerpApi free-plan quota.")
+    try:
+        serve_local_demo(
+            _settings(),
+            port=port,
+            open_browser=open_browser,
+            on_status=lambda message: console.print(f"[cyan]>[/cyan] {message}"),
+        )
+    except LocalDemoError as exc:
+        console.print(f"[red]Local demo could not start:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+
 @app.command()
 def verify(
     run_dir: Path = typer.Argument(..., exists=True, file_okay=False, dir_okay=True),
