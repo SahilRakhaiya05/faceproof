@@ -16,10 +16,10 @@ def _png_bytes(tmp_path: Path) -> bytes:
     return path.read_bytes()
 
 
-def test_materialize_facecheck_thumbnail_preserves_exact_bytes(tmp_path: Path) -> None:
+def test_materialize_embedded_thumbnail_preserves_exact_bytes(tmp_path: Path) -> None:
     raw = _png_bytes(tmp_path)
     candidate = SearchCandidate(
-        provider="facecheck",
+        provider="serpapi",
         rank=1,
         page_url="https://x.com/user/status/1",
         normalized_url="https://x.com/user/status/1",
@@ -37,7 +37,7 @@ def test_materialize_accepts_whitespace_after_data_uri_comma(tmp_path: Path) -> 
     raw = _png_bytes(tmp_path)
     encoded = base64.b64encode(raw).decode()
     candidate = SearchCandidate(
-        provider="facecheck",
+        provider="serpapi",
         rank=1,
         page_url="https://x.com/user/status/1",
         normalized_url="https://x.com/user/status/1",
@@ -50,7 +50,7 @@ def test_materialize_accepts_whitespace_after_data_uri_comma(tmp_path: Path) -> 
 
 def test_materialize_rejects_non_image_base64(tmp_path: Path) -> None:
     candidate = SearchCandidate(
-        provider="facecheck",
+        provider="serpapi",
         rank=1,
         page_url="https://x.com/user/status/1",
         normalized_url="https://x.com/user/status/1",

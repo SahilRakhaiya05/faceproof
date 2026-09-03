@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {EvidenceRegistry} from "../src/EvidenceRegistry.sol";
+import { EvidenceRegistry } from "../src/EvidenceRegistry.sol";
 
 interface Vm {
     struct Log {
@@ -20,8 +20,7 @@ interface Vm {
 }
 
 contract EvidenceRegistryTest {
-    Vm private constant vm =
-        Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
+    Vm private constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
 
     EvidenceRegistry private registry;
 
@@ -57,8 +56,7 @@ contract EvidenceRegistryTest {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                EvidenceRegistry.CommitmentAlreadyAnchored.selector,
-                COMMITMENT
+                EvidenceRegistry.CommitmentAlreadyAnchored.selector, COMMITMENT
             )
         );
         registry.anchor(COMMITMENT);
@@ -74,8 +72,7 @@ contract EvidenceRegistryTest {
     function testGetUnknownCommitmentReverts() public {
         vm.expectRevert(
             abi.encodeWithSelector(
-                EvidenceRegistry.CommitmentNotFound.selector,
-                COMMITMENT
+                EvidenceRegistry.CommitmentNotFound.selector, COMMITMENT
             )
         );
         registry.getRecord(COMMITMENT);
@@ -96,15 +93,11 @@ contract EvidenceRegistryTest {
         );
         _assertEq(logs[0].topics[1], COMMITMENT, "commitment not indexed");
         _assertEq(
-            logs[0].topics[2],
-            bytes32(uint256(uint160(ALICE))),
-            "submitter not indexed"
+            logs[0].topics[2], bytes32(uint256(uint160(ALICE))), "submitter not indexed"
         );
 
-        (uint256 timestamp, uint256 blockNumber) = abi.decode(
-            logs[0].data,
-            (uint256, uint256)
-        );
+        (uint256 timestamp, uint256 blockNumber) =
+            abi.decode(logs[0].data, (uint256, uint256));
         _assertEq(timestamp, block.timestamp, "wrong event timestamp");
         _assertEq(blockNumber, block.number, "wrong event block number");
     }
@@ -113,27 +106,24 @@ contract EvidenceRegistryTest {
         require(condition, message);
     }
 
-    function _assertEq(
-        address actual,
-        address expected,
-        string memory message
-    ) private pure {
+    function _assertEq(address actual, address expected, string memory message)
+        private
+        pure
+    {
         require(actual == expected, message);
     }
 
-    function _assertEq(
-        bytes32 actual,
-        bytes32 expected,
-        string memory message
-    ) private pure {
+    function _assertEq(bytes32 actual, bytes32 expected, string memory message)
+        private
+        pure
+    {
         require(actual == expected, message);
     }
 
-    function _assertEq(
-        uint256 actual,
-        uint256 expected,
-        string memory message
-    ) private pure {
+    function _assertEq(uint256 actual, uint256 expected, string memory message)
+        private
+        pure
+    {
         require(actual == expected, message);
     }
 }

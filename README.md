@@ -34,7 +34,7 @@ face-similarity scores are investigative candidates and require human review.
 consented image
   -> YuNet face detection / quality gate
   -> SFace aligned embedding
-  -> FaceCheck.ID or SerpApi Lens live query
+  -> SerpApi Google Lens live query (cache disabled)
   -> stable social-post permalink filtering
   -> SFace re-match against returned candidate media
   -> public post identity/media capture and validation
@@ -53,11 +53,9 @@ off-chain.
 
 - Python 3.11 or newer
 - [`uv`](https://docs.astral.sh/uv/) (recommended) or `pip`
-- One search provider account:
-  - [FaceCheck.ID API](https://facecheck.id/en/Face-Search/API), recommended for
-    a different photo of the same person
-  - [SerpApi Google Lens](https://serpapi.com/google-lens-api), recommended for
-    exact/cropped/reposted-image discovery
+- A [SerpApi Google Lens](https://serpapi.com/google-lens-api) account. Its
+  free plan currently includes 250 searches per month; no paid search provider
+  is required for the demo.
 - A clean, tracked Git checkout whose exact commit is recorded for anchored runs
 - A dedicated testnet-only EVM wallet for blockchain writes
 - Base Sepolia test ETH and a deployed `EvidenceRegistry`
@@ -76,6 +74,8 @@ uv run faceproof doctor
 ```
 
 Add provider and chain settings to `.env`; never commit that file.
+See [`docs/SETUP.md`](docs/SETUP.md) for the complete free-tier key, testnet,
+deployment, live-run, and re-verification walkthrough.
 For a final demo, set `FACEPROOF_SOURCE_REVISION` to the exact output of
 `git rev-parse HEAD`, then require every readiness gate with
 `uv run faceproof doctor --demo`.
@@ -88,7 +88,7 @@ the dynamically returned permalink:
 
 ```powershell
 uv run faceproof run --image .\samples\consented-person.jpg `
-  --provider serpapi --live --i-have-consent --skip-anchor
+  --live --i-have-consent --skip-anchor
 ```
 
 After reviewing the selected post and evidence directory, run a fresh live
@@ -96,20 +96,11 @@ search and approve that exact URL for anchoring. The command fails if the URL is
 not returned, does not independently face-match, or cannot be captured as a
 real post permalink.
 
-FaceCheck production search:
-
-```powershell
-uv run faceproof run --image .\samples\consented-person.jpg `
-  --provider facecheck --live --i-have-consent `
-  --consent-reference "volunteer-a-2026-09" `
-  --approve-post-url "https://www.reddit.com/r/example/comments/abc/example"
-```
-
 SerpApi Google Lens with cache explicitly disabled:
 
 ```powershell
 uv run faceproof run --image .\samples\consented-person.jpg `
-  --provider serpapi --live --i-have-consent `
+  --live --i-have-consent `
   --consent-reference "volunteer-a-2026-09" `
   --approve-post-url "https://www.reddit.com/r/example/comments/abc/example"
 ```
@@ -118,12 +109,8 @@ Development without a blockchain write is deliberately explicit:
 
 ```powershell
 uv run faceproof run --image .\samples\consented-person.jpg `
-  --provider serpapi --live --i-have-consent --skip-anchor
+  --live --i-have-consent --skip-anchor
 ```
-
-FaceCheck's reduced testing index can be selected with
-`--facecheck-testing`, but vendor documentation states that its results are not
-meaningful. It is not acceptable evidence of the required live search.
 
 ### Re-verify and demonstrate tampering
 

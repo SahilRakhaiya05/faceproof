@@ -48,7 +48,6 @@ from .face import (
 from .model_assets import verify_default_models
 from .provenance import ProvenanceError, verify_git_source_revision
 from .search import (
-    FaceCheckProvider,
     SearchCandidate,
     SearchError,
     SearchRun,
@@ -130,12 +129,10 @@ class LocalVerificationResult:
 def run_pipeline(
     *,
     image_path: Path,
-    provider_name: str,
     settings: Settings,
     consent_acknowledged: bool,
     consent_reference: str | None = None,
     live: bool,
-    facecheck_testing: bool = False,
     skip_anchor: bool = False,
     threshold: float = DEFAULT_COSINE_THRESHOLD,
     max_candidates: int = 6,
@@ -152,12 +149,6 @@ def run_pipeline(
         raise PipelineError(
             "A pipeline run requires explicit --live acknowledgement; fixtures are test-only"
         )
-    if provider_name not in {"facecheck", "serpapi"}:
-        raise PipelineError(f"Unsupported search provider: {provider_name}")
-    if facecheck_testing and provider_name != "facecheck":
-        raise PipelineError("--facecheck-testing is only valid with provider facecheck")
-    if facecheck_testing and not skip_anchor:
-        raise PipelineError("FaceCheck testing mode cannot produce an anchored evidence claim")
     if not -1 <= threshold <= 1:
         raise PipelineError("Face similarity threshold must be between -1 and 1")
     if not skip_anchor and threshold < DEFAULT_COSINE_THRESHOLD:
@@ -181,7 +172,7 @@ def run_pipeline(
             "Anchoring requires a non-sensitive --consent-reference for the authorized demo"
         )
     try:
-        settings.provider_key(provider_name)
+        settings.require_serpapi_key()
         if not skip_anchor:
             settings.require_chain_write()
             if not settings.contract_code_hash:
@@ -228,33 +219,28 @@ def run_pipeline(
         _write_json(run_dir / "run-error.json", {"stage": "face", "error": str(exc)})
         raise PipelineError(str(exc)) from exc
     _save_face_preview(query_path, query_encoding, input_dir / "detected-face.jpg")
-    face_crop_path = _save_face_crop(query_path, query_encoding, input_dir / "face-crop.jpg")
+    _save_face_crop(query_path, query_encoding, input_dir / "face-crop.jpg")
     _write_json(input_dir / "face-encoding.json", _face_metadata(query_encoding))
 
-    search_image_path = (
-        face_crop_path if provider_name == "facecheck" and face_crop_path else query_path
-    )
-    search_query_strategy = (
-        "detected-face-crop" if search_image_path == face_crop_path else "full-input-image"
-    )
+    # Lens receives the full scan because surrounding visual context materially
+    # improves exact/cropped/repost retrieval. The detected crop and embedding
+    # remain hashed evidence and every returned candidate is rechecked locally.
+    search_image_path = query_path
+    search_query_strategy = "full-input-face-scan"
 
     provider = _make_provider(
-        provider_name,
         settings=settings,
-        facecheck_testing=facecheck_testing,
         live=live,
     )
-    _stage(on_stage, f"Running genuine live search through {provider_name}")
+    _stage(on_stage, "Running genuine live Google Lens search through SerpApi")
     try:
         with provider:
             search_run = provider.search(search_image_path)
     except (SearchError, OSError) as exc:
         _write_json(run_dir / "run-error.json", {"stage": "search", "error": str(exc)})
         raise PipelineError(f"Search failed: {exc}") from exc
-    if not search_run.live or search_run.provider != provider_name:
+    if not search_run.live or search_run.provider != "serpapi":
         raise PipelineError("Search provider did not return a verifiable live production run")
-    if search_run.provider_mode == "testing" and not skip_anchor:
-        raise PipelineError("Testing search results cannot be anchored")
 
     search_dir = run_dir / "search"
     search_dir.mkdir()
@@ -445,7 +431,6 @@ def run_pipeline(
         selected=selected,
         capture=post_capture,
         threshold=threshold,
-        facecheck_testing=facecheck_testing,
         search_query_strategy=search_query_strategy,
         linkage_level=linkage_level,
         post_media_similarity=post_media_similarity,
@@ -693,19 +678,11 @@ def run_tamper_demo(run_dir: Path) -> tuple[str, dict[str, Any]]:
 
 
 def _make_provider(
-    provider_name: str,
     *,
     settings: Settings,
-    facecheck_testing: bool,
     live: bool,
-) -> FaceCheckProvider | SerpApiLensProvider:
-    key = settings.provider_key(provider_name)
-    if provider_name == "facecheck":
-        return FaceCheckProvider(
-            key,
-            testing_mode=facecheck_testing,
-            timeout_seconds=settings.http_timeout_seconds,
-        )
+) -> SerpApiLensProvider:
+    key = settings.require_serpapi_key()
     return SerpApiLensProvider(
         key,
         timeout_seconds=settings.http_timeout_seconds,
@@ -791,7 +768,6 @@ def _manifest_metadata(
     selected: CandidateEvaluation,
     capture: PostCapture,
     threshold: float,
-    facecheck_testing: bool,
     search_query_strategy: str,
     linkage_level: str,
     post_media_similarity: float | None,
@@ -820,7 +796,6 @@ def _manifest_metadata(
             "retrieved_at": search_run.retrieved_at,
             "live": search_run.live,
             "provider_mode": search_run.provider_mode,
-            "facecheck_testing": facecheck_testing,
             "query_strategy": search_query_strategy,
             "candidate_count": len(search_run.candidates),
         },
@@ -907,12 +882,7 @@ def _save_face_preview(source: Path, encoding: FaceEncoding, destination: Path) 
 def _save_face_crop(
     source: Path, encoding: FaceEncoding, destination: Path, *, margin_ratio: float = 0.18
 ) -> Path | None:
-    """Save a detected face crop for face-specific providers.
-
-    The original input is retained separately, and the crop is an explicit
-    hashed artifact. Google Lens continues to receive the full input because
-    surrounding visual context is valuable for exact/repost discovery.
-    """
+    """Save the detected face crop as an explicit hashed evidence artifact."""
     try:
         import cv2
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,70 @@ from .base import (
     normalize_page_url,
     redact_secrets,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class SerpApiAccount:
+    """Non-sensitive SerpApi readiness data returned by the free Account API."""
+
+    status: str
+    plan_name: str
+    searches_per_month: int
+    searches_left: int
+    this_month_usage: int
+    hourly_limit: int
+
+    @property
+    def ready(self) -> bool:
+        return self.status.casefold() == "active" and self.searches_left > 0
+
+
+def check_serpapi_account(
+    api_key: str,
+    *,
+    timeout_seconds: float = 10,
+    client: httpx.Client | None = None,
+) -> SerpApiAccount:
+    """Validate a key and quota without consuming a search credit."""
+    if not api_key.strip():
+        raise ValueError("SerpApi API key is required")
+    owns_client = client is None
+    http_client = client or httpx.Client(timeout=timeout_seconds)
+    try:
+        response = http_client.get(
+            "https://serpapi.com/account.json",
+            params={"api_key": api_key},
+        )
+        response.raise_for_status()
+        body = response.json()
+    except httpx.HTTPError as exc:
+        raise SearchError(f"SerpApi account check failed: {_safe_http_error(exc)}") from exc
+    except ValueError as exc:
+        raise SearchError("SerpApi account check returned invalid JSON") from exc
+    finally:
+        if owns_client:
+            http_client.close()
+
+    if not isinstance(body, dict):
+        raise SearchError("SerpApi account check returned a malformed response")
+    if body.get("error"):
+        error = redact_secrets(str(body["error"]), secret_values=(api_key,))
+        raise SearchError(f"SerpApi account error: {error}")
+    try:
+        return SerpApiAccount(
+            status=_required_string(body.get("account_status"), "account_status"),
+            plan_name=_required_string(body.get("plan_name"), "plan_name"),
+            searches_per_month=_non_negative_int(
+                body.get("searches_per_month"), "searches_per_month"
+            ),
+            searches_left=_non_negative_int(body.get("total_searches_left"), "total_searches_left"),
+            this_month_usage=_non_negative_int(body.get("this_month_usage"), "this_month_usage"),
+            hourly_limit=_non_negative_int(
+                body.get("account_rate_limit_per_hour"), "account_rate_limit_per_hour"
+            ),
+        )
+    except ValueError as exc:
+        raise SearchError(f"SerpApi account check returned malformed quota data: {exc}") from exc
 
 
 class SerpApiLensProvider:
@@ -113,6 +178,13 @@ class SerpApiLensProvider:
                 raise SearchError("SerpApi response engine did not match google_lens")
             if echoed.get("image_id") not in {None, image_id}:
                 raise SearchError("SerpApi response image_id did not match the uploaded image")
+            if echoed.get("type") not in {None, "all"}:
+                raise SearchError("SerpApi response search type did not match all")
+            if (
+                "no_cache" in echoed
+                and str(echoed["no_cache"]).casefold() != str(self.no_cache).lower()
+            ):
+                raise SearchError("SerpApi response cache mode did not match the request")
 
         candidates: list[SearchCandidate] = []
         for fallback_rank, item in enumerate(body.get("visual_matches") or [], start=1):
@@ -125,7 +197,7 @@ class SerpApiLensProvider:
             candidates.append(
                 SearchCandidate(
                     provider=self.name,
-                    rank=int(item.get("position", fallback_rank)),
+                    rank=_positive_int(item.get("position"), fallback_rank),
                     page_url=str(item["link"]),
                     normalized_url=normalized,
                     title=_optional_string(item.get("title")),
@@ -196,7 +268,25 @@ def _optional_string(value: Any) -> str | None:
 
 
 def _optional_bool(value: Any) -> bool | None:
-    return bool(value) if value is not None else None
+    return value if type(value) is bool else None
+
+
+def _positive_int(value: Any, fallback: int) -> int:
+    if type(value) is int and value > 0:
+        return value
+    return fallback
+
+
+def _required_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty string")
+    return value.strip()
+
+
+def _non_negative_int(value: Any, field: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{field} must be a non-negative integer")
+    return value
 
 
 def _safe_http_error(error: httpx.HTTPError) -> str:

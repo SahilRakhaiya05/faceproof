@@ -5,15 +5,15 @@ from .base import (
     filter_social_candidates,
     normalize_page_url,
 )
-from .facecheck import FaceCheckProvider
-from .serpapi import SerpApiLensProvider
+from .serpapi import SerpApiAccount, SerpApiLensProvider, check_serpapi_account
 
 __all__ = [
-    "FaceCheckProvider",
     "SearchCandidate",
     "SearchError",
     "SearchRun",
+    "SerpApiAccount",
     "SerpApiLensProvider",
+    "check_serpapi_account",
     "filter_social_candidates",
     "normalize_page_url",
 ]

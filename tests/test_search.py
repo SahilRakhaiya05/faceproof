@@ -8,7 +8,7 @@ import pytest
 import respx
 from PIL import Image
 
-from faceproof.search import FaceCheckProvider, SearchError, SerpApiLensProvider
+from faceproof.search import SearchError, SerpApiLensProvider, check_serpapi_account
 from faceproof.search.base import (
     SearchCandidate,
     extract_post_id,
@@ -101,99 +101,6 @@ def test_social_filter_rejects_profiles_and_homepages() -> None:
         ),
     ]
     assert [item.rank for item in filter_social_candidates(candidates)] == [3]
-
-
-def test_facecheck_uploads_polls_and_normalizes(tmp_path: Path) -> None:
-    image_path = tmp_path / "input.jpg"
-    _write_jpeg(image_path)
-    poll_count = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal poll_count
-        assert request.headers["authorization"] == "secret"
-        if request.url.path == "/api/upload_pic":
-            return httpx.Response(200, json={"error": None, "id_search": "search-1"})
-        if request.url.path == "/api/search":
-            poll_count += 1
-            if poll_count == 1:
-                return httpx.Response(200, json={"error": None, "progress": 50})
-            return httpx.Response(
-                200,
-                json={
-                    "error": None,
-                    "api_key": "secret",
-                    "output": {
-                        "items": [
-                            {
-                                "index": 1,
-                                "guid": "candidate-1",
-                                "score": 91,
-                                "url": {
-                                    "value": "https://twitter.com/person/status/42?utm_source=x"
-                                },
-                                "base64": "aGVsbG8=",
-                            }
-                        ]
-                    },
-                },
-            )
-        raise AssertionError(f"Unexpected URL: {request.url}")
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    provider = FaceCheckProvider(
-        "secret",
-        client=client,
-        poll_interval_seconds=0,
-        base_url="https://facecheck.test",
-    )
-    run = provider.search(image_path)
-
-    assert run.search_id == "search-1"
-    assert run.provider_mode == "production"
-    assert run.candidates[0].normalized_url == "https://twitter.com/person/status/42"
-    assert run.candidates[0].post_id == "42"
-    assert run.candidates[0].provider_score == 91
-    assert len(run.raw_response["polls"]) == 2
-    assert run.raw_response["polls"][-1]["api_key"] == "[REDACTED]"
-    assert "raw_http_bodies" not in run.raw_response
-    assert len(run.raw_response["raw_http_body_sha256"]["polls"][-1]) == 64
-
-
-def test_facecheck_honors_authoritative_demo_flag(tmp_path: Path) -> None:
-    image_path = tmp_path / "input.jpg"
-    _write_jpeg(image_path)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/upload_pic":
-            return httpx.Response(200, json={"error": None, "id_search": "search-demo"})
-        return httpx.Response(
-            200,
-            json={"error": None, "output": {"demo": True, "items": []}},
-        )
-
-    provider = FaceCheckProvider(
-        "secret",
-        client=httpx.Client(transport=httpx.MockTransport(handler)),
-        poll_interval_seconds=0,
-        base_url="https://facecheck.test",
-    )
-    assert provider.search(image_path).provider_mode == "testing"
-
-
-def test_facecheck_api_error_does_not_disclose_token(tmp_path: Path) -> None:
-    image_path = tmp_path / "face.jpg"
-    image_path.write_bytes(b"face")
-    secret = "facecheck-secret-value"
-
-    with respx.mock(assert_all_called=True) as router:
-        router.post("https://facecheck.id/api/upload_pic").mock(
-            return_value=httpx.Response(200, json={"error": f"invalid token {secret}"})
-        )
-        with FaceCheckProvider(secret) as provider, pytest.raises(SearchError) as exc_info:
-            provider.search(image_path)
-
-    assert secret not in str(exc_info.value)
-    assert "[REDACTED]" in str(exc_info.value)
 
 
 def test_serpapi_upload_and_live_lens_search(tmp_path: Path) -> None:
@@ -299,3 +206,49 @@ def test_serpapi_preparation_compresses_unsupported_large_input(tmp_path: Path) 
     assert media_type == "image/jpeg"
     with Image.open(io.BytesIO(data)) as reopened:
         assert reopened.format == "JPEG"
+
+
+def test_serpapi_account_check_returns_only_safe_quota_data() -> None:
+    secret = "serpapi-secret-value"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["api_key"] == secret
+        return httpx.Response(
+            200,
+            json={
+                "account_id": "private-account-id",
+                "api_key": secret,
+                "account_email": "private@example.test",
+                "account_status": "Active",
+                "plan_name": "Free",
+                "searches_per_month": 250,
+                "total_searches_left": 249,
+                "this_month_usage": 1,
+                "account_rate_limit_per_hour": 50,
+            },
+        )
+
+    account = check_serpapi_account(
+        secret,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert account.ready
+    assert account.plan_name == "Free"
+    assert account.searches_left == 249
+    assert secret not in repr(account)
+    assert "private@example.test" not in repr(account)
+
+
+def test_serpapi_account_check_redacts_errors() -> None:
+    secret = "serpapi-secret-value"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"error": f"invalid key {secret}"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(SearchError) as exc_info:
+        check_serpapi_account(secret, client=client)
+
+    assert secret not in str(exc_info.value)
+    assert "[REDACTED]" in str(exc_info.value)

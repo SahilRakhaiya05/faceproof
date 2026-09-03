@@ -23,6 +23,7 @@ from .pipeline import (
     verify_run,
 )
 from .provenance import ProvenanceError, verify_git_source_revision
+from .search import SearchError, check_serpapi_account
 
 app = typer.Typer(
     name="faceproof",
@@ -93,6 +94,11 @@ def verify_models() -> None:
 
 @app.command()
 def doctor(
+    check_search: bool = typer.Option(
+        True,
+        "--check-search/--no-check-search",
+        help="Validate the SerpApi key and remaining quota without using a search credit.",
+    ),
     check_rpc: bool = typer.Option(
         True, "--check-rpc/--no-check-rpc", help="Check the configured RPC and contract."
     ),
@@ -122,17 +128,31 @@ def doctor(
         _status(models_ok),
         "verified" if models_ok else "run: faceproof models download",
     )
-    facecheck_ok = bool(settings.facecheck_api_token)
     serpapi_ok = bool(settings.serpapi_api_key)
+    serpapi_detail = "configured; account not checked"
+    if serpapi_ok and (check_search or demo):
+        try:
+            account = check_serpapi_account(
+                settings.require_serpapi_key(),
+                timeout_seconds=min(settings.http_timeout_seconds, 10),
+            )
+        except (SearchError, ValueError):
+            serpapi_ok = False
+            serpapi_detail = "account validation failed"
+        else:
+            serpapi_ok = account.ready
+            serpapi_detail = (
+                f"{account.plan_name}; {account.searches_left}/"
+                f"{account.searches_per_month} searches remaining"
+            )
+            if not account.ready:
+                serpapi_detail += "; account inactive or quota exhausted"
+    elif not serpapi_ok:
+        serpapi_detail = "SERPAPI_API_KEY not set"
     table.add_row(
-        "FaceCheck",
-        _status(facecheck_ok, optional=True),
-        "configured" if facecheck_ok else "FACECHECK_API_TOKEN not set",
-    )
-    table.add_row(
-        "SerpApi",
-        _status(serpapi_ok, optional=True),
-        "configured" if serpapi_ok else "SERPAPI_API_KEY not set",
+        "SerpApi Google Lens",
+        _status(serpapi_ok),
+        serpapi_detail,
     )
 
     chain_configured = bool(settings.contract_address and settings.private_key)
@@ -207,7 +227,7 @@ def doctor(
     table.add_row("RPC", _status(rpc_ok, optional=True), rpc_detail)
     console.print(table)
 
-    core_ok = py_ok and models_ok and (facecheck_ok or serpapi_ok)
+    core_ok = py_ok and models_ok and serpapi_ok
     if demo:
         core_ok = (
             core_ok
@@ -259,7 +279,6 @@ def scan(
 @app.command("run")
 def run_command(
     image: Path = typer.Option(..., "--image", exists=True, file_okay=True, dir_okay=False),
-    provider: str = typer.Option("facecheck", "--provider", help="facecheck or serpapi"),
     live: bool = typer.Option(
         False,
         "--live",
@@ -270,11 +289,6 @@ def run_command(
         None,
         "--consent-reference",
         help="Non-sensitive consent record reference; required before anchoring.",
-    ),
-    facecheck_testing: bool = typer.Option(
-        False,
-        "--facecheck-testing",
-        help="Use FaceCheck's reduced, non-meaningful testing index.",
     ),
     skip_anchor: bool = typer.Option(
         False,
@@ -298,11 +312,6 @@ def run_command(
 ) -> None:
     """Run face scan, live discovery, evidence capture, anchor, and read-back."""
     _require_consent(i_have_consent)
-    if facecheck_testing:
-        console.print(
-            "[yellow]Warning: FaceCheck testing mode is a real request but its reduced "
-            "index is not valid evidence for the task.[/yellow]"
-        )
     settings = _settings()
     console.print(
         Panel.fit(
@@ -313,12 +322,10 @@ def run_command(
     try:
         result = run_pipeline(
             image_path=image,
-            provider_name=provider.lower(),
             settings=settings,
             consent_acknowledged=True,
             consent_reference=consent_reference,
             live=live,
-            facecheck_testing=facecheck_testing,
             skip_anchor=skip_anchor,
             threshold=threshold,
             max_candidates=max_candidates,

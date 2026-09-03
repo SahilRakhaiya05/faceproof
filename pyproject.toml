@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "faceproof"
-version = "0.1.0"
+version = "0.2.0"
 description = "Consent-first face-to-web discovery with tamper-evident blockchain verification."
 readme = "README.md"
 requires-python = ">=3.11"

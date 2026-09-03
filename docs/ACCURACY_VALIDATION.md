@@ -65,9 +65,10 @@ deviation 0.45 percentage points.
 | Benchmark script for this run | `5eafe4ae804526ab3b5ad0b51c1d15e486f0764e5296e59f4baf66d831224254` |
 | Face API source for this run | `7e62360fdc695db7de0b822a5ead62683024f64d8ce7a4d9512f1790dd0bee7e` |
 
-Runtime for the recorded rerun was 102.69 seconds end to end with cached,
-rehash-verified acquisition; face encoding took 84.24 seconds. First-run time
-depends on the network and extraction speed. The environment was Python 3.11.15
+The FaceProof 0.2.0 release rerun reproduced every aggregate metric and input
+fingerprint above. It took 243.96 seconds including pinned-input acquisition
+and 172.03 seconds for the benchmark itself; face encoding took 143.48 seconds.
+Runtime varies by disk, CPU, and network. The environment was Python 3.11.15
 and OpenCV 4.14.0. Bootstrap results use 1,000 deterministic replicates with
 seed `20260903`.
 

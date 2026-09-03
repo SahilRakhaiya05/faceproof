@@ -34,17 +34,12 @@ contract EvidenceRegistry {
         }
 
         Record memory record = Record({
-            submitter: msg.sender,
-            timestamp: block.timestamp,
-            blockNumber: block.number
+            submitter: msg.sender, timestamp: block.timestamp, blockNumber: block.number
         });
 
         _records[commitment] = record;
         emit EvidenceAnchored(
-            commitment,
-            record.submitter,
-            record.timestamp,
-            record.blockNumber
+            commitment, record.submitter, record.timestamp, record.blockNumber
         );
     }
 

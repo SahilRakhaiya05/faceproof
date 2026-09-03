@@ -43,7 +43,7 @@ def test_run_refuses_to_start_without_consent(tmp_path: Path, monkeypatch) -> No
 
     result = runner.invoke(
         cli_module.app,
-        ["run", "--image", str(_input_file(tmp_path)), "--provider", "serpapi", "--live"],
+        ["run", "--image", str(_input_file(tmp_path)), "--live"],
     )
 
     assert result.exit_code == 2
@@ -112,8 +112,6 @@ def test_successful_unanchored_run_renders_release_evidence(tmp_path: Path, monk
             "run",
             "--image",
             str(_input_file(tmp_path)),
-            "--provider",
-            "serpapi",
             "--live",
             "--i-have-consent",
             "--skip-anchor",
@@ -126,7 +124,6 @@ def test_successful_unanchored_run_renders_release_evidence(tmp_path: Path, monk
     assert "0.812345" in result.output
     assert "SKIPPED" in result.output
     assert "development run only" in result.output
-    assert observed["provider_name"] == "serpapi"
     assert observed["live"] is True
     assert observed["consent_acknowledged"] is True
     assert observed["skip_anchor"] is True
@@ -225,8 +222,9 @@ def test_doctor_demo_reports_ready_without_network(tmp_path: Path, monkeypatch) 
     private_key = "private-test-value"
     settings = SimpleNamespace(
         model_dir=tmp_path / "models",
-        facecheck_api_token="facecheck-configured",
-        serpapi_api_key=None,
+        serpapi_api_key="serpapi-test-value",
+        require_serpapi_key=lambda: "serpapi-test-value",
+        http_timeout_seconds=30,
         contract_address="0x0000000000000000000000000000000000001234",
         private_key=private_key,
         contract_code_hash="0x" + "ab" * 32,
@@ -263,6 +261,16 @@ def test_doctor_demo_reports_ready_without_network(tmp_path: Path, monkeypatch) 
         lambda _directory: {"yunet.onnx": "ok", "sface.onnx": "ok"},
     )
     monkeypatch.setattr(cli_module, "make_web3", lambda *_args, **_kwargs: fake_web3)
+    monkeypatch.setattr(
+        cli_module,
+        "check_serpapi_account",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            ready=True,
+            plan_name="Free",
+            searches_left=250,
+            searches_per_month=250,
+        ),
+    )
     monkeypatch.setattr(cli_module, "registry_contract", fake_registry_contract)
     monkeypatch.setattr(
         cli_module,

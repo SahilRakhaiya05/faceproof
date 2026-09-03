@@ -28,6 +28,7 @@ contracts/broadcast/
 contracts/.anvil/
 
 # Editors / OS
+.tools/
 .idea/
 .vscode/
 .DS_Store

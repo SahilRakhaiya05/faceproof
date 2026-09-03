@@ -186,7 +186,6 @@ def test_deploy_anchor_fresh_verify_and_tamper_rejection(tmp_path: Path) -> None
         )
 
         settings = Settings(
-            facecheck_api_token=None,
             serpapi_api_key=None,
             model_dir=tmp_path / "models",
             output_dir=tmp_path / "unused-output",

@@ -48,6 +48,8 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
         with:
           version: v1.8.1
+      - run: forge fmt --check
+        working-directory: contracts
       - run: forge test -vv
         working-directory: contracts
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

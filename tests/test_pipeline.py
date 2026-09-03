@@ -25,7 +25,6 @@ from faceproof.search.base import SearchCandidate, SearchRun
 
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
-        facecheck_api_token=None,
         serpapi_api_key="synthetic-test-key",
         model_dir=tmp_path / "models",
         output_dir=tmp_path / "evidence",
@@ -81,7 +80,6 @@ def test_anchored_run_requires_code_and_source_pins_before_processing(tmp_path: 
     )
     arguments = {
         "image_path": tmp_path / "not-read.jpg",
-        "provider_name": "serpapi",
         "settings": settings,
         "consent_acknowledged": True,
         "consent_reference": "test-consent",
@@ -335,7 +333,6 @@ def test_pipeline_orchestrates_search_rematch_and_evidence(tmp_path: Path, monke
 
     result = run_pipeline(
         image_path=input_image,
-        provider_name="serpapi",
         settings=_settings(tmp_path),
         consent_acknowledged=True,
         live=True,
@@ -364,7 +361,6 @@ def test_pipeline_fails_closed_when_pinned_models_do_not_verify(
     try:
         run_pipeline(
             image_path=input_image,
-            provider_name="serpapi",
             settings=_settings(tmp_path),
             consent_acknowledged=True,
             live=True,

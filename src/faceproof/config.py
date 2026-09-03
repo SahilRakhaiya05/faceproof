@@ -17,7 +17,6 @@ class Settings:
     Secrets are intentionally never represented in ``repr`` output.
     """
 
-    facecheck_api_token: str | None = field(repr=False)
     serpapi_api_key: str | None = field(repr=False)
     model_dir: Path
     output_dir: Path
@@ -33,7 +32,6 @@ class Settings:
     @classmethod
     def from_env(cls) -> Settings:
         return cls(
-            facecheck_api_token=_optional_env("FACECHECK_API_TOKEN"),
             serpapi_api_key=_optional_env("SERPAPI_API_KEY"),
             model_dir=Path(os.getenv("FACEPROOF_MODEL_DIR", "models")),
             output_dir=Path(os.getenv("FACEPROOF_OUTPUT_DIR", "evidence")),
@@ -55,22 +53,10 @@ class Settings:
     def sface_model(self) -> Path:
         return self.model_dir / "face_recognition_sface_2021dec.onnx"
 
-    def provider_key(self, provider: str) -> str:
-        keys = {
-            "facecheck": self.facecheck_api_token,
-            "serpapi": self.serpapi_api_key,
-        }
-        try:
-            value = keys[provider]
-        except KeyError as exc:
-            raise ValueError(f"Unsupported provider: {provider}") from exc
-        if not value:
-            env_name = {
-                "facecheck": "FACECHECK_API_TOKEN",
-                "serpapi": "SERPAPI_API_KEY",
-            }[provider]
-            raise ValueError(f"{env_name} is required for provider '{provider}'")
-        return value
+    def require_serpapi_key(self) -> str:
+        if not self.serpapi_api_key:
+            raise ValueError("SERPAPI_API_KEY is required for live Google Lens search")
+        return self.serpapi_api_key
 
     def require_chain_write(self) -> tuple[str, str]:
         if not self.contract_address:

@@ -8,7 +8,7 @@ technical integrity, and judge confidence.
 | Requirement | Implementation | Evidence shown to judges |
 |---|---|---|
 | Face identification | OpenCV YuNet detection/quality gate and SFace embedding, with pinned model hashes | Detection preview, face geometry, quality metrics, model fingerprints, local re-match score |
-| Genuine web/social search | Live FaceCheck production API or SerpApi Google Lens with cache disabled; no runtime fixture fallback | Provider request/search ID, capture time, sanitized parsed response, exact-body SHA-256, dynamically returned post candidates |
+| Genuine web/social search | Live SerpApi Google Lens direct-image query with cache disabled; no runtime fixture fallback | Provider request/search ID, capture time, sanitized parsed response, exact-body SHA-256, dynamically returned post candidates |
 | Matching social post | Platform-specific permalink IDs, provider-image re-match, public post identity capture, post-media re-match when exposed | Stable permalink, post ID, capture artifact, linkage level, selected/captured media hashes |
 | Blockchain upload | Salted commitment to the canonical evidence manifest, written to `EvidenceRegistry` | Base Sepolia contract, transaction, block, sender, emitted event and explorer page |
 | Re-verification | Local artifact re-hash plus trusted-chain, bytecode, transaction, receipt, event and registry-state checks | `faceproof verify` PASS from a fresh process; one-byte tamper demo FAIL |
@@ -19,10 +19,9 @@ technical integrity, and judge confidence.
 1. **Consent and demo subject** — obtain written, revocable consent from an
    adult volunteer. Use a public post they control or expressly authorize.
    Keep the consent document private and record only a non-sensitive reference.
-2. **Search reliability** — test both providers on two or three consented,
-   already-indexed posts. Use FaceCheck for cross-photo identity discovery and
-   SerpApi Lens for exact/cropped repost discovery. Never use FaceCheck testing
-   mode as submission evidence.
+2. **Search reliability** — test SerpApi Lens on two or three consented,
+   already-indexed posts using the same image, a crop, and a compressed copy.
+   Record search success separately from local face-verification accuracy.
 3. **Threshold calibration** — retain the reproducible aggregate LFW baseline,
    then create a small consented in-domain validation set with positive and
    negative pairs under realistic compression/crop conditions. Freeze the
@@ -60,7 +59,7 @@ technical integrity, and judge confidence.
 
 ## Remaining external inputs
 
-- a production FaceCheck or SerpApi key;
+- a SerpApi key with free-plan quota remaining;
 - a consented test image and a discoverable public post;
 - a funded Base Sepolia wallet and deployed registry address;
 - approval to create/publish the repository under the owner's GitHub account.

@@ -5,7 +5,6 @@ from faceproof.config import Settings
 
 def test_settings_repr_redacts_secrets(tmp_path: Path) -> None:
     settings = Settings(
-        facecheck_api_token="face-secret",
         serpapi_api_key="serp-secret",
         model_dir=tmp_path,
         output_dir=tmp_path,
@@ -18,7 +17,6 @@ def test_settings_repr_redacts_secrets(tmp_path: Path) -> None:
     )
 
     rendered = repr(settings)
-    assert "face-secret" not in rendered
     assert "serp-secret" not in rendered
     assert "wallet-secret" not in rendered
 
