@@ -5,11 +5,12 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 import faceproof.pipeline as pipeline_module
 from faceproof.capture import PostCapture
-from faceproof.chain import ChainVerification
+from faceproof.chain import AnchorReceipt, AnchorSubmission, ChainError, ChainVerification
 from faceproof.config import Settings
 from faceproof.evidence import build_manifest, canonical_manifest_bytes, compute_commitment
 from faceproof.face import (
@@ -19,7 +20,14 @@ from faceproof.face import (
     FaceQualityMetrics,
     ModelFingerprints,
 )
-from faceproof.pipeline import PipelineError, run_pipeline, run_tamper_demo, verify_run
+from faceproof.pipeline import (
+    PipelineError,
+    anchor_submission_path,
+    recover_pending_anchor,
+    run_pipeline,
+    run_tamper_demo,
+    verify_run,
+)
 from faceproof.search.base import SearchCandidate, SearchRun
 
 
@@ -266,6 +274,38 @@ def _encoding(embedding: tuple[float, ...]) -> FaceEncoding:
     )
 
 
+def test_profile_discovery_requires_explicit_authorization(tmp_path: Path) -> None:
+    try:
+        run_pipeline(
+            image_path=tmp_path / "unused.jpg",
+            settings=_settings(tmp_path),
+            consent_acknowledged=True,
+            live=True,
+            skip_anchor=True,
+            max_profile_candidates=1,
+        )
+    except PipelineError as exc:
+        assert "profile discovery requires" in str(exc).casefold()
+    else:
+        raise AssertionError("profile discovery started without explicit authorization")
+
+
+def test_review_proof_requires_paired_bytes32_values(tmp_path: Path) -> None:
+    try:
+        run_pipeline(
+            image_path=tmp_path / "unused.jpg",
+            settings=_settings(tmp_path),
+            consent_acknowledged=True,
+            live=True,
+            skip_anchor=True,
+            review_manifest_sha256="0x" + "11" * 32,
+        )
+    except PipelineError as exc:
+        assert "both manifest hash and commitment" in str(exc)
+    else:
+        raise AssertionError("an incomplete discovery proof was accepted")
+
+
 def test_pipeline_orchestrates_search_rematch_and_evidence(tmp_path: Path, monkeypatch) -> None:
     input_image = tmp_path / "query.jpg"
     Image.new("RGB", (32, 32), color=(100, 110, 120)).save(input_image, "JPEG")
@@ -348,6 +388,8 @@ def test_pipeline_orchestrates_search_rematch_and_evidence(tmp_path: Path, monke
     assert result.similarity_threshold == 0.5
     assert result.selected_media_path.is_file()
     assert (result.run_dir / "manifest.json").is_file()
+    manifest = json.loads((result.run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["metadata"]["search"]["platform_filter_mode"] == "all"
     verified = verify_run(result.run_dir, settings=_settings(tmp_path), require_chain=False)
     assert verified.passed
 
@@ -376,3 +418,112 @@ def test_pipeline_fails_closed_when_pinned_models_do_not_verify(
         assert "SHA-256 mismatch" in str(exc)
     else:
         raise AssertionError("pipeline accepted an untrusted face model")
+
+
+def test_pending_anchor_recovery_writes_receipt_and_removes_journal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_dir = tmp_path / "evidence" / "recoverable-run"
+    run_dir.mkdir(parents=True)
+    _write_sidecars(run_dir)
+    contract = "0x" + "33" * 20
+    transaction_hash = "0x" + "44" * 32
+    submission = AnchorSubmission(
+        schema="faceproof-anchor-submission/v1",
+        chain_id=31337,
+        contract_address=contract,
+        commitment=json.loads((run_dir / "commitment.json").read_text())["commitment"],
+        transaction_hash=transaction_hash,
+        submitter="0x" + "55" * 20,
+        nonce=7,
+    )
+    pending_path = anchor_submission_path(run_dir)
+    pending_path.write_text(json.dumps(submission.to_dict()), encoding="utf-8")
+    settings = replace(
+        _settings(tmp_path),
+        contract_address=contract,
+        private_key="0x" + "11" * 32,
+        contract_code_hash="0x" + "66" * 32,
+    )
+    receipt = AnchorReceipt(
+        schema="faceproof-anchor-receipt/v1",
+        chain_id=31337,
+        rpc_network="local",
+        contract_address=contract,
+        commitment=submission.commitment,
+        transaction_hash=transaction_hash,
+        block_number=12,
+        block_hash="0x" + "77" * 32,
+        transaction_status=1,
+        submitter=submission.submitter,
+        chain_timestamp=1_700_000_000,
+        confirmations_observed=2,
+    )
+    verification = ChainVerification(
+        connected=True,
+        chain_id_matches=True,
+        anchored=True,
+        commitment=submission.commitment,
+        confirmations_satisfied=True,
+        receipt_consistent=True,
+    )
+    observed: dict[str, object] = {}
+
+    def fake_recover(commitment: str, **kwargs):
+        observed["commitment"] = commitment
+        observed.update(kwargs)
+        return receipt
+
+    monkeypatch.setattr(pipeline_module, "recover_anchor_receipt", fake_recover)
+    monkeypatch.setattr(
+        pipeline_module,
+        "verify_commitment_on_chain",
+        lambda *_args, **_kwargs: verification,
+    )
+
+    recovered = recover_pending_anchor(run_dir, settings=settings)
+
+    assert recovered.receipt == receipt
+    assert recovered.verification.passed
+    assert observed["submission"] == submission.to_dict()
+    assert not pending_path.exists()
+    assert (
+        json.loads((run_dir / "chain-receipt.json").read_text())["transaction_hash"]
+        == transaction_hash
+    )
+
+
+def test_pending_anchor_recovery_retains_journal_while_rpc_is_ambiguous(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_dir = tmp_path / "evidence" / "pending-run"
+    run_dir.mkdir(parents=True)
+    _write_sidecars(run_dir)
+    commitment = json.loads((run_dir / "commitment.json").read_text())["commitment"]
+    submission = AnchorSubmission(
+        schema="faceproof-anchor-submission/v1",
+        chain_id=31337,
+        contract_address="0x" + "33" * 20,
+        commitment=commitment,
+        transaction_hash="0x" + "44" * 32,
+        submitter="0x" + "55" * 20,
+        nonce=7,
+    )
+    pending_path = anchor_submission_path(run_dir)
+    pending_path.write_text(json.dumps(submission.to_dict()), encoding="utf-8")
+    settings = replace(
+        _settings(tmp_path),
+        contract_address=submission.contract_address,
+        private_key="0x" + "11" * 32,
+        contract_code_hash="0x" + "66" * 32,
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "recover_anchor_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ChainError("RPC unavailable")),
+    )
+
+    with pytest.raises(PipelineError, match="still pending"):
+        recover_pending_anchor(run_dir, settings=settings)
+
+    assert pending_path.is_file()

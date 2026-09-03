@@ -19,11 +19,13 @@ from .model_assets import ModelDownloadError, download_default_models, verify_de
 from .pipeline import (
     InconclusiveError,
     PipelineError,
+    recover_pending_anchor,
     run_pipeline,
     run_tamper_demo,
     verify_run,
 )
 from .provenance import ProvenanceError, verify_git_source_revision
+from .review import ReviewError, load_reviewed_discovery
 from .search import SearchError, check_serpapi_account
 
 app = typer.Typer(
@@ -279,7 +281,14 @@ def scan(
 
 @app.command("run")
 def run_command(
-    image: Path = typer.Option(..., "--image", exists=True, file_okay=True, dir_okay=False),
+    image: Path = typer.Option(
+        ...,
+        "--image",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        help="Consented query image. Anchor mode reuses the exact sealed discovery input.",
+    ),
     live: bool = typer.Option(
         False,
         "--live",
@@ -304,16 +313,82 @@ def run_command(
         help="Frozen SFace cosine threshold; calibrate before final judging.",
     ),
     max_candidates: int = typer.Option(6, "--max-candidates", min=1, max=20),
+    search_mode: str = typer.Option(
+        "standard",
+        "--search-mode",
+        help="standard uses one visual query; deep uses exact + visual queries (two credits).",
+    ),
+    platforms: str = typer.Option(
+        "all",
+        "--platforms",
+        help="Comma-separated eligible platforms, or all.",
+    ),
+    check_linkedin_profiles: bool = typer.Option(
+        False,
+        "--check-linkedin-profiles",
+        help="Opt in to locally checking Lens-returned LinkedIn profile thumbnails as leads.",
+    ),
     approve_post_url: str | None = typer.Option(
         None,
         "--approve-post-url",
         help="Exact permalink approved by a human; required before anchoring.",
     ),
     output_dir: Path | None = typer.Option(None, "--output-dir", file_okay=False),
+    review_run_id: str | None = typer.Option(
+        None,
+        "--review-run-id",
+        help="Discovery evidence run whose selected permalink was reviewed before anchoring.",
+    ),
 ) -> None:
     """Run face scan, live discovery, evidence capture, anchor, and read-back."""
     _require_consent(i_have_consent)
     settings = _settings()
+    selected_platforms = None
+    if platforms.strip().casefold() != "all":
+        selected_platforms = frozenset(
+            item.strip().casefold() for item in platforms.split(",") if item.strip()
+        )
+    effective_image = image
+    review_manifest_sha256: str | None = None
+    review_commitment: str | None = None
+    profile_candidate_limit = 6 if check_linkedin_profiles else 0
+    profile_authorized = check_linkedin_profiles
+    profile_platforms: frozenset[str] | None = frozenset({"linkedin"})
+    if not skip_anchor:
+        if not review_run_id or not approve_post_url:
+            console.print(
+                "[red]Stopped:[/red] anchoring requires --review-run-id and the exact "
+                "--approve-post-url from a completed discovery."
+            )
+            raise typer.Exit(code=2)
+        try:
+            reviewed = load_reviewed_discovery(
+                output_dir=output_dir or settings.output_dir,
+                run_id=review_run_id,
+                approved_post_url=approve_post_url,
+                settings=settings,
+            )
+        except ReviewError as exc:
+            console.print(f"[red]Reviewed discovery rejected:[/red] {exc}")
+            raise typer.Exit(code=2) from exc
+        if reviewed.profile_discovery_authorized and not check_linkedin_profiles:
+            console.print(
+                "[red]Stopped:[/red] re-pass --check-linkedin-profiles to acknowledge the "
+                "reviewed discovery's profile-lead policy."
+            )
+            raise typer.Exit(code=2)
+        effective_image = reviewed.image_path
+        search_mode = reviewed.search_mode
+        selected_platforms = reviewed.platforms
+        max_candidates = reviewed.max_candidates
+        profile_candidate_limit = reviewed.max_profile_candidates
+        profile_authorized = reviewed.profile_discovery_authorized
+        profile_platforms = reviewed.profile_platforms
+        review_manifest_sha256 = reviewed.manifest_sha256
+        review_commitment = reviewed.commitment
+        console.print(
+            "[cyan]>[/cyan] Reusing the verified discovery image, permalink, and search policy."
+        )
     console.print(
         Panel.fit(
             "FaceProof — proof of discovery, not proof of identity or truth",
@@ -322,7 +397,7 @@ def run_command(
     )
     try:
         result = run_pipeline(
-            image_path=image,
+            image_path=effective_image,
             settings=settings,
             consent_acknowledged=True,
             consent_reference=consent_reference,
@@ -330,7 +405,15 @@ def run_command(
             skip_anchor=skip_anchor,
             threshold=threshold,
             max_candidates=max_candidates,
+            max_profile_candidates=profile_candidate_limit,
+            profile_discovery_authorized=profile_authorized,
+            profile_platforms=profile_platforms,
+            search_mode=search_mode,
+            platforms=selected_platforms,
             approved_post_url=approve_post_url,
+            review_run_id=review_run_id,
+            review_manifest_sha256=review_manifest_sha256,
+            review_commitment=review_commitment,
             output_dir=output_dir,
             on_stage=lambda message: console.print(f"[cyan]>[/cyan] {message}"),
         )
@@ -375,6 +458,58 @@ def run_command(
     console.print("Matched image file: ", _display_text(str(result.selected_media_path.resolve())))
     if result.explorer_url:
         console.print(f"Explorer: [link={result.explorer_url}]{result.explorer_url}[/link]")
+
+
+@app.command("recover-anchor")
+def recover_anchor_command(
+    run_dir: Path = typer.Argument(..., exists=True, file_okay=False, dir_okay=True),
+) -> None:
+    """Recover and verify an exact journaled transaction without rebroadcasting."""
+    settings = _settings()
+    try:
+        result = recover_pending_anchor(run_dir, settings=settings)
+    except (PipelineError, ValueError) as exc:
+        console.print(f"[red]Anchor recovery incomplete:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+    table = Table(title="Recovered blockchain anchor")
+    table.add_column("Check")
+    table.add_column("Result")
+    table.add_row("Exact transaction", result.receipt.transaction_hash)
+    table.add_row("Block", str(result.receipt.block_number))
+    table.add_row("Confirmations", str(result.receipt.confirmations_observed))
+    table.add_row("Independent read-back", "[green]PASS[/green]")
+    console.print(table)
+
+
+@app.command("web")
+def web_console(
+    port: int = typer.Option(8787, "--port", min=1024, max=65535),
+    open_browser: bool = typer.Option(
+        True,
+        "--open-browser/--no-open-browser",
+        help="Open the localhost judge console in the default browser.",
+    ),
+) -> None:
+    """Launch the localhost-only FaceProof judge console."""
+    import threading
+    import webbrowser
+
+    import uvicorn
+
+    from .web import create_app
+
+    settings = _settings()
+    url = f"http://127.0.0.1:{port}"
+    console.print(f"[green]FaceProof Judge Console:[/green] {url}")
+    console.print("Bound to this computer only. Press Ctrl+C to stop.")
+    if open_browser:
+        threading.Timer(0.8, webbrowser.open, args=(url,)).start()
+    uvicorn.run(
+        create_app(settings),
+        host="127.0.0.1",
+        port=port,
+        log_level="warning",
+    )
 
 
 @app.command()

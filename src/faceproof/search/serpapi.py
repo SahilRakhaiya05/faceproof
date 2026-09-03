@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import io
 from dataclasses import dataclass
@@ -97,14 +96,18 @@ class SerpApiLensProvider:
         country: str = "in",
         language: str = "en",
         no_cache: bool = True,
+        search_mode: str = "standard",
         client: httpx.Client | None = None,
     ) -> None:
         if not api_key.strip():
             raise ValueError("SerpApi API key is required")
+        if search_mode not in {"standard", "deep"}:
+            raise ValueError("search_mode must be 'standard' or 'deep'")
         self.api_key = api_key
         self.country = country
         self.language = language
         self.no_cache = no_cache
+        self.search_mode = search_mode
         self._owns_client = client is None
         self.client = client or httpx.Client(timeout=timeout_seconds)
 
@@ -144,10 +147,111 @@ class SerpApiLensProvider:
         if not image_id:
             raise SearchError("SerpApi image upload did not return image_id")
 
+        requested_types = (
+            ("all",) if self.search_mode == "standard" else ("exact_matches", "visual_matches")
+        )
+        responses = [self._lens_request(image_id, search_type) for search_type in requested_types]
+
+        candidates: list[SearchCandidate] = []
+        seen_urls: set[str] = set()
+        web_labels: list[str] = []
+        seen_labels: set[str] = set()
+        search_ids: list[str] = []
+        for search_type, _params, _search_raw, body, metadata in responses:
+            search_ids.append(str(metadata.get("id") or image_id))
+            for label in _extract_web_labels(body):
+                if label.casefold() not in seen_labels:
+                    seen_labels.add(label.casefold())
+                    web_labels.append(label)
+            result_key = "exact_matches" if search_type == "exact_matches" else "visual_matches"
+            for fallback_rank, item in enumerate(body.get(result_key) or [], start=1):
+                if not isinstance(item, dict) or not item.get("link"):
+                    continue
+                try:
+                    normalized = normalize_page_url(str(item["link"]))
+                except ValueError:
+                    continue
+                if normalized in seen_urls:
+                    continue
+                seen_urls.add(normalized)
+                candidates.append(
+                    SearchCandidate(
+                        provider=self.name,
+                        rank=len(candidates) + 1,
+                        page_url=str(item["link"]),
+                        normalized_url=normalized,
+                        title=_optional_string(item.get("title")),
+                        source=_optional_string(item.get("source")),
+                        image_url=_optional_string(item.get("image")),
+                        thumbnail_url=_optional_string(item.get("thumbnail")),
+                        exact_match=(
+                            True
+                            if search_type == "exact_matches"
+                            else _optional_bool(item.get("exact_matches"))
+                        ),
+                        provider_item_id=(
+                            f"{search_ids[-1]}:{_positive_int(item.get('position'), fallback_rank)}"
+                        ),
+                        post_id=extract_post_id(normalized),
+                        result_type=(
+                            "exact_match" if search_type == "exact_matches" else "visual_match"
+                        ),
+                    )
+                )
+
+        primary_type, primary_params, primary_raw, primary_body, _ = responses[0]
+        search_id = search_ids[0]
+        sanitized_params = {key: value for key, value in primary_params.items() if key != "api_key"}
+        sanitized_searches = {
+            search_type: redact_secrets(body, secret_values=(self.api_key,))
+            for search_type, _params, _raw, body, _metadata in responses
+        }
+        return SearchRun.create(
+            provider=self.name,
+            search_id=search_id,
+            candidates=candidates,
+            web_labels=web_labels,
+            raw_response={
+                "query_upload": {
+                    "filename": upload_name,
+                    "media_type": media_type,
+                    "byte_size": len(upload_bytes),
+                    "sha256": hashlib.sha256(upload_bytes).hexdigest(),
+                    "metadata_stripped": True,
+                    "content_retained_in_provider_record": False,
+                },
+                "upload": redact_secrets(upload, secret_values=(self.api_key,)),
+                "search": redact_secrets(primary_body, secret_values=(self.api_key,)),
+                "searches": sanitized_searches,
+                "raw_http_body_sha256": {
+                    "upload": hashlib.sha256(upload_raw).hexdigest(),
+                    "search": hashlib.sha256(primary_raw).hexdigest(),
+                    "searches": {
+                        search_type: hashlib.sha256(search_raw).hexdigest()
+                        for search_type, _params, search_raw, _body, _metadata in responses
+                    },
+                },
+                "request_parameters": sanitized_params,
+                "requests": [
+                    {key: value for key, value in params.items() if key != "api_key"}
+                    for _search_type, params, _raw, _body, _metadata in responses
+                ],
+                "search_mode": self.search_mode,
+                "primary_search_type": primary_type,
+            },
+            live=self.no_cache,
+            provider_mode="no-cache" if self.no_cache else "cache-allowed",
+            search_ids=search_ids,
+            search_types=requested_types,
+        )
+
+    def _lens_request(
+        self, image_id: str, search_type: str
+    ) -> tuple[str, dict[str, str], bytes, dict[str, Any], dict[str, Any]]:
         params = {
             "engine": "google_lens",
             "image_id": image_id,
-            "type": "all",
+            "type": search_type,
             "safe": "active",
             "country": self.country,
             "hl": self.language,
@@ -163,6 +267,8 @@ class SerpApiLensProvider:
             raise SearchError(f"SerpApi Lens request failed: {_safe_http_error(exc)}") from exc
         except ValueError as exc:
             raise SearchError("SerpApi Lens returned invalid JSON") from exc
+        if not isinstance(body, dict):
+            raise SearchError("SerpApi Lens returned a malformed response")
         if body.get("error"):
             error = redact_secrets(str(body["error"]), secret_values=(self.api_key,))
             raise SearchError(f"SerpApi Lens error: {error}")
@@ -178,64 +284,14 @@ class SerpApiLensProvider:
                 raise SearchError("SerpApi response engine did not match google_lens")
             if echoed.get("image_id") not in {None, image_id}:
                 raise SearchError("SerpApi response image_id did not match the uploaded image")
-            if echoed.get("type") not in {None, "all"}:
-                raise SearchError("SerpApi response search type did not match all")
+            if echoed.get("type") not in {None, search_type}:
+                raise SearchError(f"SerpApi response search type did not match {search_type}")
             if (
                 "no_cache" in echoed
                 and str(echoed["no_cache"]).casefold() != str(self.no_cache).lower()
             ):
                 raise SearchError("SerpApi response cache mode did not match the request")
-
-        candidates: list[SearchCandidate] = []
-        for fallback_rank, item in enumerate(body.get("visual_matches") or [], start=1):
-            if not isinstance(item, dict) or not item.get("link"):
-                continue
-            try:
-                normalized = normalize_page_url(str(item["link"]))
-            except ValueError:
-                continue
-            candidates.append(
-                SearchCandidate(
-                    provider=self.name,
-                    rank=_positive_int(item.get("position"), fallback_rank),
-                    page_url=str(item["link"]),
-                    normalized_url=normalized,
-                    title=_optional_string(item.get("title")),
-                    source=_optional_string(item.get("source")),
-                    image_url=_optional_string(item.get("image")),
-                    thumbnail_url=_optional_string(item.get("thumbnail")),
-                    exact_match=_optional_bool(item.get("exact_matches")),
-                    post_id=extract_post_id(normalized),
-                )
-            )
-
-        search_id = str(metadata.get("id") or image_id)
-        sanitized_params = {key: value for key, value in params.items() if key != "api_key"}
-        return SearchRun.create(
-            provider=self.name,
-            search_id=search_id,
-            candidates=candidates,
-            web_labels=_extract_web_labels(body),
-            raw_response={
-                "query_upload": {
-                    "filename": upload_name,
-                    "media_type": media_type,
-                    "byte_size": len(upload_bytes),
-                    "sha256": hashlib.sha256(upload_bytes).hexdigest(),
-                    "base64": base64.b64encode(upload_bytes).decode("ascii"),
-                    "metadata_stripped": True,
-                },
-                "upload": redact_secrets(upload, secret_values=(self.api_key,)),
-                "search": redact_secrets(body, secret_values=(self.api_key,)),
-                "raw_http_body_sha256": {
-                    "upload": hashlib.sha256(upload_raw).hexdigest(),
-                    "search": hashlib.sha256(search_raw).hexdigest(),
-                },
-                "request_parameters": sanitized_params,
-            },
-            live=self.no_cache,
-            provider_mode="no-cache" if self.no_cache else "cache-allowed",
-        )
+        return search_type, params, search_raw, body, metadata
 
 
 def prepare_serpapi_upload(image_path: Path, *, max_bytes: int = 490_000) -> tuple[bytes, str, str]:

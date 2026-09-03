@@ -10,17 +10,21 @@ from web3 import Web3
 
 import faceproof.chain as chain
 from faceproof.chain import (
+    AnchorPendingError,
+    AnchorSubmission,
     ChainError,
     ChainVerification,
     bytes32_hex,
     explorer_transaction_url,
     parse_bytes32,
+    recover_anchor_receipt,
     registry_contract,
 )
 
 COMMITMENT = bytes(range(1, 33))
 OTHER_COMMITMENT = bytes(range(33, 65))
-TX_HASH = bytes.fromhex("11" * 32)
+RAW_TRANSACTION = b"signed-transaction"
+TX_HASH = bytes(Web3.keccak(RAW_TRANSACTION))
 OTHER_TX_HASH = bytes.fromhex("12" * 32)
 BLOCK_HASH = bytes.fromhex("22" * 32)
 OTHER_BLOCK_HASH = bytes.fromhex("23" * 32)
@@ -29,6 +33,7 @@ OTHER_ADDRESS = Web3.to_checksum_address("0x" + "44" * 20)
 SUBMITTER = Web3.to_checksum_address("0x" + "55" * 20)
 BLOCK_NUMBER = 123_456
 BLOCK_TIMESTAMP = 1_800_000_000
+NONCE = 7
 ANCHOR_CALLDATA = bytes(Web3.keccak(text="anchor(bytes32)")[:4]) + COMMITMENT
 
 
@@ -85,6 +90,17 @@ class _FakeEth:
     def block_number(self) -> int:
         return self.state["head"]
 
+    @property
+    def chain_id(self) -> int:
+        return 84532
+
+    def wait_for_transaction_receipt(
+        self, _transaction_hash: bytes, *, timeout: float, poll_latency: float
+    ) -> dict[str, Any]:
+        assert timeout > 0
+        assert poll_latency > 0
+        return self.state["receipt"]
+
     def get_transaction_receipt(self, _transaction_hash: bytes) -> dict[str, Any]:
         return self.state["receipt"]
 
@@ -112,6 +128,7 @@ def _chain_fixture() -> tuple[Any, _FakeContract, dict[str, Any], dict[str, Any]
         "from": SUBMITTER,
         "to": CONTRACT_ADDRESS,
         "value": 0,
+        "nonce": NONCE,
         "input": ANCHOR_CALLDATA,
     }
     block = {
@@ -153,7 +170,120 @@ def _chain_fixture() -> tuple[Any, _FakeContract, dict[str, Any], dict[str, Any]
         "chain_timestamp": BLOCK_TIMESTAMP,
         "confirmations_observed": 1,
     }
-    return SimpleNamespace(eth=_FakeEth(state)), _FakeContract(state), saved, state
+    return (
+        SimpleNamespace(eth=_FakeEth(state), is_connected=lambda: True),
+        _FakeContract(state),
+        saved,
+        state,
+    )
+
+
+def _submission(**changes: Any) -> AnchorSubmission:
+    values = {
+        "schema": chain.SUBMISSION_SCHEMA,
+        "chain_id": 84532,
+        "contract_address": CONTRACT_ADDRESS,
+        "commitment": bytes32_hex(COMMITMENT),
+        "transaction_hash": bytes32_hex(TX_HASH),
+        "submitter": SUBMITTER,
+        "nonce": NONCE,
+        **changes,
+    }
+    return AnchorSubmission(**values)
+
+
+class _PreparedAnchorCall:
+    def __init__(self, commitment: bytes) -> None:
+        assert commitment == COMMITMENT
+
+    def estimate_gas(self, _transaction: dict[str, Any]) -> int:
+        return 50_000
+
+    def build_transaction(self, transaction: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **transaction,
+            "to": CONTRACT_ADDRESS,
+            "data": "0x" + ANCHOR_CALLDATA.hex(),
+        }
+
+
+class _PreparedAnchorFunctions:
+    def verify(self, commitment: bytes) -> _FakeCall:
+        assert commitment == COMMITMENT
+        return _FakeCall(False)
+
+    def anchor(self, commitment: bytes) -> _PreparedAnchorCall:
+        return _PreparedAnchorCall(commitment)
+
+
+class _PreparedAnchorContract:
+    address = CONTRACT_ADDRESS
+    functions = _PreparedAnchorFunctions()
+
+    def encode_abi(self, name: str, *, args: list[bytes]) -> str:
+        assert name == "anchor"
+        assert args == [COMMITMENT]
+        return "0x" + ANCHOR_CALLDATA.hex()
+
+
+class _PreparedAccount:
+    address = SUBMITTER
+
+    def __init__(self, signed_hash: bytes) -> None:
+        self.signed_hash = signed_hash
+
+    def sign_transaction(self, _built: dict[str, Any]) -> SimpleNamespace:
+        return SimpleNamespace(hash=self.signed_hash, raw_transaction=RAW_TRANSACTION)
+
+
+class _PreparedAnchorEth:
+    chain_id = 84532
+    max_priority_fee = 1
+
+    def __init__(
+        self,
+        *,
+        send_error: Exception | None = None,
+        signed_hash: bytes = TX_HASH,
+    ) -> None:
+        self.account = SimpleNamespace(from_key=lambda _private_key: _PreparedAccount(signed_hash))
+        self.send_count = 0
+        self.send_error = send_error
+        self.persisted = False
+
+    def get_transaction_count(self, address: str, state: str) -> int:
+        assert address == SUBMITTER
+        assert state == "pending"
+        return NONCE
+
+    def get_block(self, identifier: str) -> dict[str, int]:
+        assert identifier == "latest"
+        return {"baseFeePerGas": 10}
+
+    def send_raw_transaction(self, raw_transaction: bytes) -> bytes:
+        assert self.persisted
+        assert raw_transaction == RAW_TRANSACTION
+        self.send_count += 1
+        if self.send_error is not None:
+            raise self.send_error
+        return TX_HASH
+
+    def wait_for_transaction_receipt(
+        self, _transaction_hash: bytes, *, timeout: float, poll_latency: float
+    ) -> dict[str, Any]:
+        assert timeout > 0
+        assert poll_latency > 0
+        raise chain.TimeExhausted
+
+
+def _install_prepared_anchor(monkeypatch: pytest.MonkeyPatch, eth: _PreparedAnchorEth) -> None:
+    web3 = SimpleNamespace(eth=eth, is_connected=lambda: True)
+    monkeypatch.setattr(chain, "make_web3", lambda *_args, **_kwargs: web3)
+    monkeypatch.setattr(
+        chain,
+        "registry_contract",
+        lambda *_args, **_kwargs: _PreparedAnchorContract(),
+    )
 
 
 def _verify_fixture(
@@ -288,6 +418,298 @@ def test_rpc_connection_error_redacts_credentials(monkeypatch: pytest.MonkeyPatc
     assert "https://rpc.example" in message
     for secret in ("user", "password", "secret-token", "also-secret", "apiKey"):
         assert secret not in message
+
+
+def test_submission_is_persisted_before_broadcast_and_timeout_is_recoverable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eth = _PreparedAnchorEth()
+    _install_prepared_anchor(monkeypatch, eth)
+    captured: list[AnchorSubmission] = []
+
+    def persist(submission: AnchorSubmission) -> None:
+        assert eth.send_count == 0
+        captured.append(submission)
+        eth.persisted = True
+
+    with pytest.raises(AnchorPendingError, match="without rebroadcasting") as raised:
+        chain.anchor_commitment(
+            COMMITMENT,
+            rpc_url="https://rpc.example/private-token",
+            expected_chain_id=84532,
+            contract_address=CONTRACT_ADDRESS,
+            private_key="private-test-value",
+            timeout_seconds=1,
+            on_submission=persist,
+        )
+
+    assert eth.send_count == 1
+    assert captured == [raised.value.submission]
+    assert raised.value.submission == _submission()
+    serialized = str(raised.value.submission.to_dict())
+    assert "private-test-value" not in serialized
+    assert "private-token" not in serialized
+    assert "signed-transaction" not in serialized
+
+    recovery_web3, recovery_contract, _saved, _state = _chain_fixture()
+    monkeypatch.setattr(chain, "make_web3", lambda *_args, **_kwargs: recovery_web3)
+    monkeypatch.setattr(chain, "registry_contract", lambda *_args, **_kwargs: recovery_contract)
+    recovered = recover_anchor_receipt(
+        COMMITMENT,
+        submission=captured[0],
+        rpc_url="https://rpc.example/private-token",
+        expected_chain_id=84532,
+        contract_address=CONTRACT_ADDRESS,
+        expected_submitter=SUBMITTER,
+        timeout_seconds=1,
+    )
+    assert recovered.transaction_hash == bytes32_hex(TX_HASH)
+    assert eth.send_count == 1
+
+
+def test_submission_persistence_failure_aborts_before_broadcast_and_redacts_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eth = _PreparedAnchorEth()
+    _install_prepared_anchor(monkeypatch, eth)
+
+    def fail_to_persist(_submission: AnchorSubmission) -> None:
+        raise OSError("do-not-leak-this-path")
+
+    with pytest.raises(ChainError, match="transaction was not broadcast") as raised:
+        chain.anchor_commitment(
+            COMMITMENT,
+            rpc_url="https://rpc.example/private-token",
+            expected_chain_id=84532,
+            contract_address=CONTRACT_ADDRESS,
+            private_key="private-test-value",
+            timeout_seconds=1,
+            on_submission=fail_to_persist,
+        )
+
+    assert eth.send_count == 0
+    assert "do-not-leak-this-path" not in str(raised.value)
+    assert "private-test-value" not in str(raised.value)
+    assert "private-token" not in str(raised.value)
+    assert raised.value.__cause__ is None
+
+
+def test_signer_hash_mismatch_aborts_before_persistence_or_broadcast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eth = _PreparedAnchorEth(signed_hash=OTHER_TX_HASH)
+    _install_prepared_anchor(monkeypatch, eth)
+    persisted: list[AnchorSubmission] = []
+
+    with pytest.raises(ChainError, match="serialized transaction bytes"):
+        chain.anchor_commitment(
+            COMMITMENT,
+            rpc_url="https://rpc.example",
+            expected_chain_id=84532,
+            contract_address=CONTRACT_ADDRESS,
+            private_key="private-test-value",
+            timeout_seconds=1,
+            on_submission=persisted.append,
+        )
+
+    assert persisted == []
+    assert eth.send_count == 0
+
+
+def test_ambiguous_send_error_preserves_exact_signed_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eth = _PreparedAnchorEth(send_error=ConnectionError("provider-secret"))
+    _install_prepared_anchor(monkeypatch, eth)
+
+    def persist(submission: AnchorSubmission) -> None:
+        assert submission == _submission()
+        eth.persisted = True
+
+    with pytest.raises(AnchorPendingError) as raised:
+        chain.anchor_commitment(
+            COMMITMENT,
+            rpc_url="https://rpc.example/private-token",
+            expected_chain_id=84532,
+            contract_address=CONTRACT_ADDRESS,
+            private_key="private-test-value",
+            timeout_seconds=1,
+            on_submission=persist,
+        )
+
+    assert eth.send_count == 1
+    assert raised.value.submission.transaction_hash == bytes32_hex(TX_HASH)
+    assert "provider-secret" not in str(raised.value)
+    assert "private-token" not in str(raised.value)
+    assert raised.value.__cause__ is None
+
+
+def test_recovery_reads_only_the_exact_saved_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    web3, contract, _saved, _state = _chain_fixture()
+    monkeypatch.setattr(chain, "make_web3", lambda *_args, **_kwargs: web3)
+    monkeypatch.setattr(chain, "registry_contract", lambda *_args, **_kwargs: contract)
+
+    receipt = recover_anchor_receipt(
+        COMMITMENT,
+        submission=_submission(),
+        rpc_url="https://rpc.example/private-token",
+        expected_chain_id=84532,
+        contract_address=CONTRACT_ADDRESS,
+        expected_submitter=SUBMITTER,
+        timeout_seconds=1,
+    )
+
+    assert receipt.transaction_hash == bytes32_hex(TX_HASH)
+    assert receipt.commitment == bytes32_hex(COMMITMENT)
+    assert receipt.submitter == SUBMITTER
+    assert receipt.block_number == BLOCK_NUMBER
+    assert receipt.confirmations_observed == 11
+
+
+def test_recovery_timeout_never_rebroadcasts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eth = _PreparedAnchorEth()
+    web3 = SimpleNamespace(eth=eth, is_connected=lambda: True)
+    monkeypatch.setattr(chain, "make_web3", lambda *_args, **_kwargs: web3)
+    monkeypatch.setattr(
+        chain,
+        "registry_contract",
+        lambda *_args, **_kwargs: _PreparedAnchorContract(),
+    )
+
+    with pytest.raises(AnchorPendingError) as raised:
+        recover_anchor_receipt(
+            COMMITMENT,
+            submission=_submission(),
+            rpc_url="https://rpc.example/private-token",
+            expected_chain_id=84532,
+            contract_address=CONTRACT_ADDRESS,
+            expected_submitter=SUBMITTER,
+            timeout_seconds=1,
+        )
+
+    assert raised.value.submission == _submission()
+    assert eth.send_count == 0
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected_submitter", "message"),
+    [
+        ({"schema": "unknown"}, SUBMITTER, "unsupported schema"),
+        ({"chain_id": 1}, SUBMITTER, "expected chain"),
+        ({"contract_address": OTHER_ADDRESS}, SUBMITTER, "trusted registry"),
+        ({"commitment": bytes32_hex(OTHER_COMMITMENT)}, SUBMITTER, "commitment"),
+        ({"submitter": OTHER_ADDRESS}, SUBMITTER, "expected submitter"),
+    ],
+)
+def test_recovery_rejects_tampered_context_before_chain_reads(
+    changes: dict[str, Any],
+    expected_submitter: str,
+    message: str,
+) -> None:
+    with pytest.raises(ChainError, match=message):
+        recover_anchor_receipt(
+            COMMITMENT,
+            submission=_submission(**changes),
+            rpc_url="https://unused.invalid",
+            expected_chain_id=84532,
+            contract_address=CONTRACT_ADDRESS,
+            expected_submitter=expected_submitter,
+            timeout_seconds=1,
+        )
+
+
+def test_recovery_rejects_wrong_nonce_and_unrelated_registry_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    web3, contract, _saved, state = _chain_fixture()
+    monkeypatch.setattr(chain, "make_web3", lambda *_args, **_kwargs: web3)
+    monkeypatch.setattr(chain, "registry_contract", lambda *_args, **_kwargs: contract)
+
+    with pytest.raises(ChainError):
+        recover_anchor_receipt(
+            COMMITMENT,
+            submission=_submission(transaction_hash=bytes32_hex(OTHER_TX_HASH)),
+            rpc_url="https://rpc.example",
+            expected_chain_id=84532,
+            contract_address=CONTRACT_ADDRESS,
+            expected_submitter=SUBMITTER,
+            timeout_seconds=1,
+        )
+
+    with pytest.raises(ChainError, match="nonce"):
+        recover_anchor_receipt(
+            COMMITMENT,
+            submission=_submission(nonce=NONCE + 1),
+            rpc_url="https://rpc.example",
+            expected_chain_id=84532,
+            contract_address=CONTRACT_ADDRESS,
+            expected_submitter=SUBMITTER,
+            timeout_seconds=1,
+        )
+
+    state["record"] = (OTHER_ADDRESS, BLOCK_TIMESTAMP, BLOCK_NUMBER)
+    with pytest.raises(ChainError, match="Registry record"):
+        recover_anchor_receipt(
+            COMMITMENT,
+            submission=_submission(),
+            rpc_url="https://rpc.example",
+            expected_chain_id=84532,
+            contract_address=CONTRACT_ADDRESS,
+            expected_submitter=SUBMITTER,
+            timeout_seconds=1,
+        )
+
+
+def test_unknown_status_and_reorg_keep_exact_recovery_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    web3, contract, _saved, state = _chain_fixture()
+    monkeypatch.setattr(chain, "make_web3", lambda *_args, **_kwargs: web3)
+    monkeypatch.setattr(chain, "registry_contract", lambda *_args, **_kwargs: contract)
+
+    state["receipt"]["status"] = 2
+    with pytest.raises(AnchorPendingError, match="unknown receipt status") as unknown:
+        recover_anchor_receipt(
+            COMMITMENT,
+            submission=_submission(),
+            rpc_url="https://rpc.example",
+            expected_chain_id=84532,
+            contract_address=CONTRACT_ADDRESS,
+            expected_submitter=SUBMITTER,
+            timeout_seconds=1,
+        )
+    assert unknown.value.submission == _submission()
+
+    state["receipt"]["status"] = 0
+    with pytest.raises(ChainError, match="reverted") as reverted:
+        recover_anchor_receipt(
+            COMMITMENT,
+            submission=_submission(),
+            rpc_url="https://rpc.example",
+            expected_chain_id=84532,
+            contract_address=CONTRACT_ADDRESS,
+            expected_submitter=SUBMITTER,
+            timeout_seconds=1,
+        )
+    assert not isinstance(reverted.value, AnchorPendingError)
+
+    state["receipt"]["status"] = 1
+    state["block"]["hash"] = OTHER_BLOCK_HASH
+    with pytest.raises(AnchorPendingError, match="Canonical anchor validation") as reorged:
+        recover_anchor_receipt(
+            COMMITMENT,
+            submission=_submission(),
+            rpc_url="https://rpc.example",
+            expected_chain_id=84532,
+            contract_address=CONTRACT_ADDRESS,
+            expected_submitter=SUBMITTER,
+            timeout_seconds=1,
+        )
+    assert reorged.value.submission == _submission()
 
 
 def test_confirmation_timeout_is_a_failure() -> None:

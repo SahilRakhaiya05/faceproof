@@ -45,6 +45,7 @@ capture time and makes that trust boundary explicit.
 | Public biometric/PII leakage | Raw evidence remains local; only an opaque salted commitment is on-chain; embeddings are not persisted | Sharing the evidence directory or salt may reveal personal data |
 | Blockchain/network confusion | Expected chain ID, exact trusted contract address, required runtime-code hash, and trusted confirmation depth checked before writes and reads; bundle claims are not trust inputs | Public testnets and RPC services can be unavailable, reorganize, or be retired |
 | Replacement bundle freshly anchored by an attacker | Verifier accepts an out-of-band expected commitment and transaction hash; receipt/contract/event fields are cross-checked | An operator who omits the out-of-band values proves inclusion, but not that this is the previously published bundle |
+| RPC timeout causes a blind duplicate anchor | Signed transaction hash, signer, nonce, chain, contract, and commitment are journaled before broadcast; recovery validates only that exact hash and has no send path | Recovery still depends on RPC availability and the configured signer/contract trust roots |
 | Duplicate or overwritten record | Registry rejects zero and duplicate commitments and has no owner, delete, or upgrade path | A different salted commitment can still be submitted for the same content |
 | Timestamp overclaim | UI describes block inclusion as “no later than this block,” not original post time | Block timestamps are consensus metadata and not precision clocks |
 

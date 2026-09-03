@@ -31,6 +31,12 @@ SOCIAL_HOSTS = frozenset(
     }
 )
 
+SUPPORTED_PLATFORMS = frozenset(
+    {"bluesky", "facebook", "instagram", "linkedin", "reddit", "tiktok", "x", "youtube"}
+)
+CAPTURE_CAPABLE_PLATFORMS = frozenset({"bluesky", "reddit", "x", "youtube"})
+PROFILE_LEAD_PLATFORMS = frozenset({"linkedin"})
+
 _TRACKING_KEYS = {
     "fbclid",
     "gclid",
@@ -111,6 +117,7 @@ class SearchCandidate:
     exact_match: bool | None = None
     provider_item_id: str | None = None
     post_id: str | None = None
+    result_type: str = "visual_match"
 
     def public_dict(self) -> dict[str, Any]:
         """Return serializable metadata without embedding bulky thumbnail bytes."""
@@ -129,6 +136,8 @@ class SearchRun:
     web_labels: tuple[str, ...] = ()
     live: bool = True
     provider_mode: str = "production"
+    search_ids: tuple[str, ...] = ()
+    search_types: tuple[str, ...] = ()
 
     @classmethod
     def create(
@@ -141,7 +150,10 @@ class SearchRun:
         web_labels: list[str] | tuple[str, ...] = (),
         live: bool,
         provider_mode: str,
+        search_ids: list[str] | tuple[str, ...] | None = None,
+        search_types: list[str] | tuple[str, ...] = (),
     ) -> SearchRun:
+        normalized_ids = tuple(search_ids or (search_id,))
         return cls(
             provider=provider,
             search_id=search_id,
@@ -151,6 +163,8 @@ class SearchRun:
             web_labels=tuple(web_labels),
             live=live,
             provider_mode=provider_mode,
+            search_ids=normalized_ids,
+            search_types=tuple(search_types),
         )
 
 
@@ -256,12 +270,87 @@ def is_social_post_url(url: str) -> bool:
     return is_social_url(url) and extract_post_id(url) is not None
 
 
+def platform_name(url: str) -> str | None:
+    """Return a stable platform slug for a supported public social URL."""
+    try:
+        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    suffixes = (
+        ("linkedin.com", "linkedin"),
+        ("instagram.com", "instagram"),
+        ("twitter.com", "x"),
+        ("x.com", "x"),
+        ("reddit.com", "reddit"),
+        ("tiktok.com", "tiktok"),
+        ("facebook.com", "facebook"),
+        ("bsky.app", "bluesky"),
+        ("youtube.com", "youtube"),
+        ("youtu.be", "youtube"),
+    )
+    for suffix, platform in suffixes:
+        if host == suffix or host.endswith(f".{suffix}"):
+            return platform
+    return None
+
+
+def is_social_profile_url(url: str) -> bool:
+    """Identify public profile-shaped URLs without treating them as posts.
+
+    Profile results are investigative leads only. They are deliberately kept
+    separate from post permalinks and can never satisfy the anchoring gate.
+    """
+    if not is_social_url(url) or extract_post_id(url) is not None:
+        return False
+    parts = urlsplit(url)
+    path = parts.path.rstrip("/")
+    segments = [segment for segment in path.split("/") if segment]
+    platform = platform_name(url)
+    if platform == "linkedin":
+        return len(segments) == 2 and segments[0].casefold() == "in"
+    if platform == "x":
+        reserved = {"compose", "explore", "home", "i", "intent", "search", "settings"}
+        return len(segments) == 1 and segments[0].casefold() not in reserved
+    if platform == "instagram":
+        reserved = {"accounts", "direct", "explore", "p", "reel", "reels", "stories", "tv"}
+        return len(segments) == 1 and segments[0].casefold() not in reserved
+    if platform == "reddit":
+        return len(segments) == 2 and segments[0].casefold() in {"u", "user"}
+    if platform == "tiktok":
+        return len(segments) == 1 and segments[0].startswith("@")
+    if platform == "bluesky":
+        return len(segments) == 2 and segments[0].casefold() == "profile"
+    if platform == "youtube":
+        return (
+            len(segments) == 1
+            and segments[0].startswith("@")
+            or len(segments) == 2
+            and segments[0].casefold() in {"c", "channel", "user"}
+        )
+    if platform == "facebook":
+        reserved = {"groups", "marketplace", "pages", "reel", "share", "stories", "watch"}
+        return (
+            path.casefold() == "/profile.php"
+            and bool(dict(parse_qsl(parts.query)).get("id"))
+            or len(segments) == 1
+            and segments[0].casefold() not in reserved
+        )
+    return False
+
+
+def _platform_allowed(url: str, platforms: frozenset[str] | None) -> bool:
+    return platforms is None or platform_name(url) in platforms
+
+
 def filter_social_candidates(
     candidates: list[SearchCandidate] | tuple[SearchCandidate, ...],
     *,
     limit: int | None = None,
+    platforms: frozenset[str] | None = None,
 ) -> list[SearchCandidate]:
     """Filter to stable social-post permalinks and de-duplicate normalized URLs."""
+    if limit is not None and limit <= 0:
+        return []
     result: list[SearchCandidate] = []
     seen: set[str] = set()
     for candidate in sorted(candidates, key=lambda item: item.rank):
@@ -270,12 +359,45 @@ def filter_social_candidates(
         except ValueError:
             continue
         post_id = extract_post_id(normalized_url)
-        if not is_social_url(normalized_url) or not post_id:
+        if (
+            not is_social_url(normalized_url)
+            or not post_id
+            or not _platform_allowed(normalized_url, platforms)
+        ):
             continue
         if normalized_url in seen:
             continue
         seen.add(normalized_url)
         result.append(replace(candidate, normalized_url=normalized_url, post_id=post_id))
+        if limit is not None and len(result) >= limit:
+            break
+    return result
+
+
+def filter_profile_candidates(
+    candidates: list[SearchCandidate] | tuple[SearchCandidate, ...],
+    *,
+    limit: int | None = None,
+    platforms: frozenset[str] | None = None,
+) -> list[SearchCandidate]:
+    """Return de-duplicated public profile leads, never post candidates."""
+    if limit is not None and limit <= 0:
+        return []
+    result: list[SearchCandidate] = []
+    seen: set[str] = set()
+    for candidate in sorted(candidates, key=lambda item: item.rank):
+        try:
+            normalized_url = normalize_page_url(candidate.normalized_url)
+        except ValueError:
+            continue
+        if (
+            not is_social_profile_url(normalized_url)
+            or not _platform_allowed(normalized_url, platforms)
+            or normalized_url in seen
+        ):
+            continue
+        seen.add(normalized_url)
+        result.append(replace(candidate, normalized_url=normalized_url, post_id=None))
         if limit is not None and len(result) >= limit:
             break
     return result

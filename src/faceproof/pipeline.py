@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import platform
+import re
 import secrets
 import shutil
 import struct
@@ -23,11 +24,14 @@ from .capture import (
     materialize_candidate_image,
 )
 from .chain import (
+    AnchorPendingError,
     AnchorReceipt,
     ChainError,
     ChainVerification,
     anchor_commitment,
     explorer_transaction_url,
+    make_web3,
+    recover_anchor_receipt,
     verify_commitment_on_chain,
 )
 from .config import Settings
@@ -48,12 +52,16 @@ from .face import (
 from .model_assets import verify_default_models
 from .provenance import ProvenanceError, verify_git_source_revision
 from .search import (
+    PROFILE_LEAD_PLATFORMS,
+    SUPPORTED_PLATFORMS,
     SearchCandidate,
     SearchError,
     SearchRun,
     SerpApiLensProvider,
+    filter_profile_candidates,
     filter_social_candidates,
     normalize_page_url,
+    platform_name,
 )
 from .search.base import redact_url_secrets
 
@@ -114,6 +122,12 @@ class PipelineResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RecoveredAnchorResult:
+    receipt: AnchorReceipt
+    verification: ChainVerification
+
+
+@dataclass(frozen=True, slots=True)
 class LocalVerificationResult:
     evidence_ok: bool
     evidence_detail: dict[str, Any]
@@ -141,7 +155,15 @@ def run_pipeline(
     skip_anchor: bool = False,
     threshold: float = DEFAULT_COSINE_THRESHOLD,
     max_candidates: int = 6,
+    max_profile_candidates: int = 0,
+    profile_discovery_authorized: bool = False,
+    profile_platforms: frozenset[str] | None = None,
+    search_mode: str = "standard",
+    platforms: frozenset[str] | None = None,
     approved_post_url: str | None = None,
+    review_run_id: str | None = None,
+    review_manifest_sha256: str | None = None,
+    review_commitment: str | None = None,
     output_dir: Path | None = None,
     on_stage: Callable[[str], None] | None = None,
 ) -> PipelineResult:
@@ -162,7 +184,59 @@ def run_pipeline(
         )
     if max_candidates <= 0:
         raise PipelineError("max_candidates must be positive")
+    if max_profile_candidates < 0:
+        raise PipelineError("max_profile_candidates cannot be negative")
+    if max_profile_candidates and not profile_discovery_authorized:
+        raise PipelineError("Public profile discovery requires an explicit consent acknowledgement")
+    if search_mode not in {"standard", "deep"}:
+        raise PipelineError("Search mode must be 'standard' or 'deep'")
+    normalized_platforms = (
+        frozenset(item.strip().casefold() for item in platforms if item.strip())
+        if platforms is not None
+        else None
+    )
+    if platforms is not None and not normalized_platforms:
+        raise PipelineError("At least one platform is required when filtering results")
+    unsupported_platforms = (normalized_platforms or frozenset()) - SUPPORTED_PLATFORMS
+    if unsupported_platforms:
+        raise PipelineError(
+            "Unsupported platform filter: " + ", ".join(sorted(unsupported_platforms))
+        )
+    normalized_profile_platforms = (
+        frozenset(item.strip().casefold() for item in profile_platforms if item.strip())
+        if profile_platforms is not None
+        else (PROFILE_LEAD_PLATFORMS if max_profile_candidates else None)
+    )
+    if profile_platforms is not None and not normalized_profile_platforms:
+        raise PipelineError("At least one profile platform is required for profile discovery")
+    unsupported_profile_platforms = (
+        normalized_profile_platforms or frozenset()
+    ) - PROFILE_LEAD_PLATFORMS
+    if unsupported_profile_platforms:
+        raise PipelineError(
+            "Unsupported profile platform: " + ", ".join(sorted(unsupported_profile_platforms))
+        )
     approved_normalized: str | None = None
+    normalized_review_run_id = (review_run_id or "").strip() or None
+    if normalized_review_run_id and (
+        len(normalized_review_run_id) > 128
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+            for character in normalized_review_run_id
+        )
+    ):
+        raise PipelineError("Review run ID is invalid")
+    normalized_review_manifest = (review_manifest_sha256 or "").strip() or None
+    normalized_review_commitment = (review_commitment or "").strip() or None
+    review_values = (normalized_review_manifest, normalized_review_commitment)
+    if any(review_values) and not all(review_values):
+        raise PipelineError("Review evidence requires both manifest hash and commitment")
+    for label, value in (
+        ("review manifest hash", normalized_review_manifest),
+        ("review commitment", normalized_review_commitment),
+    ):
+        if value and not re.fullmatch(r"0x[0-9a-fA-F]{64}", value):
+            raise PipelineError(f"{label} must be a bytes32 hexadecimal value")
     if approved_post_url:
         try:
             approved_normalized = normalize_page_url(approved_post_url)
@@ -226,6 +300,21 @@ def run_pipeline(
     _save_face_preview(query_path, query_encoding, input_dir / "detected-face.jpg")
     _save_face_crop(query_path, query_encoding, input_dir / "face-crop.jpg")
     _write_json(input_dir / "face-encoding.json", _face_metadata(query_encoding))
+    _write_json(
+        input_dir / "consent.json",
+        {
+            "acknowledged": True,
+            "reference": normalized_consent_reference,
+            "scope": "face-search-and-public-post-evidence",
+            "profile_discovery_authorized": profile_discovery_authorized,
+            "profile_platforms": (
+                sorted(normalized_profile_platforms)
+                if profile_discovery_authorized and normalized_profile_platforms
+                else []
+            ),
+            "statement": "Operator attestation; FaceProof does not independently prove consent.",
+        },
+    )
 
     # Lens receives the full scan because surrounding visual context materially
     # improves exact/cropped/repost retrieval. The detected crop and embedding
@@ -236,6 +325,7 @@ def run_pipeline(
     provider = _make_provider(
         settings=settings,
         live=live,
+        search_mode=search_mode,
     )
     _stage(on_stage, "Running genuine live Google Lens search through SerpApi")
     try:
@@ -254,14 +344,37 @@ def run_pipeline(
         on_stage,
         f"Search {search_run.search_id} returned {len(search_run.candidates)} candidates",
     )
-    social_candidates = filter_social_candidates(search_run.candidates, limit=max_candidates)
+    profile_evaluations: list[CandidateEvaluation] = []
+    profile_candidates = filter_profile_candidates(
+        search_run.candidates,
+        limit=max_profile_candidates,
+        platforms=normalized_profile_platforms,
+    )
+
+    social_candidates = filter_social_candidates(
+        search_run.candidates,
+        limit=max_candidates,
+        platforms=normalized_platforms,
+    )
     if not social_candidates:
+        profile_evaluations = _evaluate_profile_leads(
+            profile_candidates=profile_candidates,
+            run_dir=run_dir,
+            backend=backend,
+            query_encoding=query_encoding,
+            settings=settings,
+            threshold=threshold,
+            on_stage=on_stage,
+        )
         _write_json(
             run_dir / "run-error.json",
             {
                 "stage": "social-filter",
                 "error": "No public social-media candidate was returned",
                 "search_id": search_run.search_id,
+                "profile_leads": len(profile_candidates),
+                "face_matched_profile_leads": sum(item.matched for item in profile_evaluations),
+                "platform_filter": sorted(normalized_platforms) if normalized_platforms else [],
             },
         )
         raise InconclusiveError("Live search returned no public social-media candidate", run_dir)
@@ -325,6 +438,15 @@ def run_pipeline(
 
     matched = [evaluation for evaluation in evaluations if evaluation.matched]
     if not matched:
+        profile_evaluations = _evaluate_profile_leads(
+            profile_candidates=profile_candidates,
+            run_dir=run_dir,
+            backend=backend,
+            query_encoding=query_encoding,
+            settings=settings,
+            threshold=threshold,
+            on_stage=on_stage,
+        )
         _write_json(
             run_dir / "run-error.json",
             {
@@ -332,6 +454,8 @@ def run_pipeline(
                 "error": "No social candidate passed independent local face matching",
                 "threshold_micros": round(threshold * 1_000_000),
                 "evaluated": len(evaluations),
+                "profile_leads": len(profile_candidates),
+                "face_matched_profile_leads": sum(item.matched for item in profile_evaluations),
             },
         )
         raise InconclusiveError(
@@ -347,6 +471,15 @@ def run_pipeline(
             item for item in ordered_matches if item.candidate.normalized_url == approved_normalized
         ]
         if not ordered_matches:
+            profile_evaluations = _evaluate_profile_leads(
+                profile_candidates=profile_candidates,
+                run_dir=run_dir,
+                backend=backend,
+                query_encoding=query_encoding,
+                settings=settings,
+                threshold=threshold,
+                on_stage=on_stage,
+            )
             raise InconclusiveError(
                 "The human-approved post was not returned and independently matched in this run",
                 run_dir,
@@ -396,6 +529,15 @@ def run_pipeline(
         break
 
     if selected is None or post_capture is None or linkage_level is None:
+        profile_evaluations = _evaluate_profile_leads(
+            profile_candidates=profile_candidates,
+            run_dir=run_dir,
+            backend=backend,
+            query_encoding=query_encoding,
+            settings=settings,
+            threshold=threshold,
+            on_stage=on_stage,
+        )
         _write_json(
             run_dir / "run-error.json",
             {
@@ -408,6 +550,16 @@ def run_pipeline(
             "No face-matched social post could be independently captured and validated",
             run_dir,
         )
+
+    profile_evaluations = _evaluate_profile_leads(
+        profile_candidates=profile_candidates,
+        run_dir=run_dir,
+        backend=backend,
+        query_encoding=query_encoding,
+        settings=settings,
+        threshold=threshold,
+        on_stage=on_stage,
+    )
 
     selection_record = {
         "status": "selected",
@@ -424,6 +576,9 @@ def run_pipeline(
         "human_review": {
             "approved_for_anchor": bool(approved_normalized),
             "approved_post_url": approved_normalized,
+            "discovery_run_id": normalized_review_run_id,
+            "discovery_manifest_sha256": normalized_review_manifest,
+            "discovery_commitment": normalized_review_commitment,
             "recorded_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         },
     }
@@ -443,6 +598,17 @@ def run_pipeline(
         approved_post_url=approved_normalized,
         consent_reference=normalized_consent_reference,
         source_revision=settings.source_revision,
+        search_mode=search_mode,
+        platforms=normalized_platforms,
+        profile_evaluations=profile_evaluations,
+        profile_candidate_count=len(profile_candidates),
+        profile_discovery_authorized=profile_discovery_authorized,
+        profile_platforms=normalized_profile_platforms,
+        review_run_id=normalized_review_run_id,
+        review_manifest_sha256=normalized_review_manifest,
+        review_commitment=normalized_review_commitment,
+        max_candidates=max_candidates,
+        max_profile_candidates=max_profile_candidates,
     )
     manifest = build_manifest(
         artifacts,
@@ -462,6 +628,7 @@ def run_pipeline(
     if not skip_anchor:
         _stage(on_stage, "Anchoring the salted commitment on the configured blockchain")
         contract_address, private_key = settings.require_chain_write()
+        pending_path = anchor_submission_path(run_dir)
         try:
             chain_receipt = anchor_commitment(
                 commitment_record["commitment"],
@@ -471,10 +638,25 @@ def run_pipeline(
                 private_key=private_key,
                 confirmations=settings.confirmations,
                 expected_code_hash=settings.contract_code_hash,
+                on_submission=lambda submission: _write_json(pending_path, submission.to_dict()),
             )
-            receipt_dict = chain_receipt.to_dict()
-            _write_json(run_dir / "chain-receipt.json", receipt_dict)
-            _stage(on_stage, "Reading chain state back through an independent verification call")
+        except AnchorPendingError as exc:
+            raise PipelineError(
+                "Blockchain transaction outcome is pending recovery; do not submit a new anchor. "
+                f"Recover the saved transaction {exc.submission.transaction_hash}."
+            ) from exc
+        except ChainError as exc:
+            pending_path.unlink(missing_ok=True)
+            _write_json(
+                run_dir / "run-error.json",
+                {"stage": "blockchain", "error": str(exc)},
+            )
+            raise PipelineError(f"Blockchain anchoring failed: {exc}") from exc
+
+        receipt_dict = chain_receipt.to_dict()
+        _write_json(run_dir / "chain-receipt.json", receipt_dict)
+        _stage(on_stage, "Reading chain state back through an independent verification call")
+        try:
             chain_verification = verify_commitment_on_chain(
                 commitment_record["commitment"],
                 rpc_url=settings.rpc_url,
@@ -485,15 +667,16 @@ def run_pipeline(
                 expected_code_hash=settings.contract_code_hash,
             )
         except ChainError as exc:
-            _write_json(
-                run_dir / "run-error.json",
-                {"stage": "blockchain", "error": str(exc)},
-            )
-            raise PipelineError(f"Blockchain anchoring/verification failed: {exc}") from exc
+            raise PipelineError(
+                "Blockchain receipt was recorded but independent verification is pending; "
+                "recover the saved transaction instead of submitting again."
+            ) from exc
         if not chain_verification.passed:
             raise PipelineError(
-                "Transaction was mined, but independent on-chain verification failed"
+                "Transaction was mined, but independent verification is pending; recover the "
+                "saved transaction instead of submitting again."
             )
+        pending_path.unlink(missing_ok=True)
 
     return PipelineResult(
         run_id=run_id,
@@ -512,6 +695,83 @@ def run_pipeline(
         chain_receipt=chain_receipt,
         chain_verification=chain_verification,
     )
+
+
+def anchor_submission_path(run_dir: Path) -> Path:
+    """Return the out-of-bundle journal used for exact-hash recovery."""
+    resolved = Path(run_dir).resolve()
+    return resolved.parent / f".{resolved.name}.anchor-submission.json"
+
+
+def recover_pending_anchor(run_dir: Path, *, settings: Settings) -> RecoveredAnchorResult:
+    """Recover one persisted anchor transaction without signing or rebroadcasting."""
+    run_dir = Path(run_dir).resolve()
+    if not run_dir.is_dir():
+        raise PipelineError("Evidence run directory does not exist")
+    pending_path = anchor_submission_path(run_dir)
+    if not pending_path.is_file() or pending_path.is_symlink():
+        raise PipelineError("No recoverable anchor submission exists for this run")
+    manifest = _read_json(run_dir / "manifest.json")
+    commitment_record = _read_json(run_dir / "commitment.json")
+    commitment = str(commitment_record.get("commitment") or "")
+    detail = verify_manifest(
+        manifest,
+        run_dir,
+        salt=commitment_record.get("salt"),
+        expected_commitment=commitment,
+        expected_manifest_sha256=commitment_record.get("manifest_sha256"),
+    )
+    try:
+        canonical_sidecar = (run_dir / "manifest.canonical.json").read_bytes()
+    except OSError as exc:
+        raise PipelineError("Canonical manifest sidecar is unavailable") from exc
+    if not detail.get("ok") or not secrets.compare_digest(
+        canonical_sidecar, canonical_manifest_bytes(manifest)
+    ):
+        raise PipelineError("Evidence changed after the anchor transaction was prepared")
+
+    submission_record = _read_json(pending_path)
+    contract_address, private_key = settings.require_chain_write()
+    if not settings.contract_code_hash:
+        raise PipelineError("A trusted contract code hash is required for anchor recovery")
+    try:
+        expected_submitter = (
+            make_web3(
+                settings.rpc_url,
+                timeout_seconds=min(settings.http_timeout_seconds, 30),
+            )
+            .eth.account.from_key(private_key)
+            .address
+        )
+        receipt = recover_anchor_receipt(
+            commitment,
+            submission=submission_record,
+            rpc_url=settings.rpc_url,
+            expected_chain_id=settings.chain_id,
+            contract_address=contract_address,
+            expected_submitter=expected_submitter,
+            confirmations=settings.confirmations,
+            timeout_seconds=settings.http_timeout_seconds,
+            expected_code_hash=settings.contract_code_hash,
+        )
+        receipt_dict = receipt.to_dict()
+        _write_json(run_dir / "chain-receipt.json", receipt_dict)
+        verification = verify_commitment_on_chain(
+            commitment,
+            rpc_url=settings.rpc_url,
+            expected_chain_id=settings.chain_id,
+            contract_address=contract_address,
+            receipt=receipt_dict,
+            required_confirmations=settings.confirmations,
+            timeout_seconds=settings.http_timeout_seconds,
+            expected_code_hash=settings.contract_code_hash,
+        )
+    except (ChainError, ValueError) as exc:
+        raise PipelineError(f"Anchor recovery is still pending: {exc}") from exc
+    if not verification.passed:
+        raise PipelineError("Recovered receipt did not pass independent on-chain verification")
+    pending_path.unlink(missing_ok=True)
+    return RecoveredAnchorResult(receipt=receipt, verification=verification)
 
 
 def verify_run(
@@ -692,12 +952,14 @@ def _make_provider(
     *,
     settings: Settings,
     live: bool,
+    search_mode: str = "standard",
 ) -> SerpApiLensProvider:
     key = settings.require_serpapi_key()
     return SerpApiLensProvider(
         key,
         timeout_seconds=settings.http_timeout_seconds,
         no_cache=live,
+        search_mode=search_mode,
     )
 
 
@@ -757,6 +1019,94 @@ def _candidate_assessment(evaluation: CandidateEvaluation, *, threshold: float) 
     }
 
 
+def _profile_assessment(evaluation: CandidateEvaluation, *, threshold: float) -> dict[str, Any]:
+    return {
+        "status": "face-match-lead" if evaluation.matched else "below-threshold",
+        "claim": "unverified-public-profile-lead",
+        "eligible_for_anchor": False,
+        "platform": platform_name(evaluation.candidate.normalized_url),
+        "candidate": evaluation.candidate.public_dict(),
+        "media": evaluation.media_artifact.to_dict(),
+        "detected_faces": evaluation.detected_faces,
+        "winning_face": _face_metadata(evaluation.matched_face),
+        "local_similarity_micros": evaluation.local_similarity_micros,
+        "threshold_micros": round(threshold * 1_000_000),
+        "human_review_required": True,
+        "warning": "A profile lead is not a Task 3 post match or proof of identity.",
+    }
+
+
+def _evaluate_profile_leads(
+    *,
+    profile_candidates: list[SearchCandidate],
+    run_dir: Path,
+    backend: Any,
+    query_encoding: FaceEncoding,
+    settings: Settings,
+    threshold: float,
+    on_stage: Callable[[str], None] | None,
+) -> list[CandidateEvaluation]:
+    """Evaluate opt-in profile leads after the primary Task 3 post lane."""
+    evaluations: list[CandidateEvaluation] = []
+    if not profile_candidates:
+        return evaluations
+    profile_dir = run_dir / "profile-leads"
+    profile_dir.mkdir(exist_ok=True)
+    for ordinal, candidate in enumerate(profile_candidates, start=1):
+        _stage(
+            on_stage,
+            f"Checking public profile lead {ordinal}/{len(profile_candidates)}",
+        )
+        candidate_dir = profile_dir / f"{ordinal:02d}"
+        candidate_dir.mkdir(exist_ok=True)
+        try:
+            media_artifact = materialize_candidate_image(
+                candidate,
+                candidate_dir,
+                timeout_seconds=settings.http_timeout_seconds,
+            )
+            media_path = candidate_dir / media_artifact.relative_path
+            encodings = backend.encode_faces(media_path)
+            scored_faces = [
+                (cosine_similarity(query_encoding.embedding, item.embedding), item)
+                for item in encodings
+            ]
+            similarity, matched_face = max(scored_faces, key=lambda scored: scored[0])
+            evaluation = CandidateEvaluation(
+                candidate=candidate,
+                directory=candidate_dir,
+                media_path=media_path,
+                media_artifact=media_artifact,
+                local_similarity=similarity,
+                detected_faces=len(encodings),
+                matched_face=matched_face,
+                matched=similarity >= threshold,
+            )
+            evaluations.append(evaluation)
+            _save_face_preview(
+                media_path,
+                matched_face,
+                candidate_dir / "matched-face-preview.jpg",
+            )
+            _write_json(
+                candidate_dir / "assessment.json",
+                _profile_assessment(evaluation, threshold=threshold),
+            )
+        except (CaptureError, FaceError) as exc:
+            _write_json(
+                candidate_dir / "assessment.json",
+                {
+                    "candidate": candidate.public_dict(),
+                    "platform": platform_name(candidate.normalized_url),
+                    "status": "rejected",
+                    "claim": "unverified-public-profile-lead",
+                    "eligible_for_anchor": False,
+                    "error": str(exc),
+                },
+            )
+    return evaluations
+
+
 def _write_search_record(path: Path, run: SearchRun) -> None:
     _write_json(
         path,
@@ -766,6 +1116,8 @@ def _write_search_record(path: Path, run: SearchRun) -> None:
             "retrieved_at": run.retrieved_at,
             "live": run.live,
             "provider_mode": run.provider_mode,
+            "search_ids": list(run.search_ids),
+            "search_types": list(run.search_types),
             "web_labels": list(run.web_labels),
             "web_label_interpretation": "unverified-provider-derived-search-hint",
             "candidates": [candidate.public_dict() for candidate in run.candidates],
@@ -787,6 +1139,17 @@ def _manifest_metadata(
     approved_post_url: str | None,
     consent_reference: str | None,
     source_revision: str | None,
+    search_mode: str,
+    platforms: frozenset[str] | None,
+    profile_evaluations: list[CandidateEvaluation],
+    profile_candidate_count: int,
+    profile_discovery_authorized: bool,
+    profile_platforms: frozenset[str] | None,
+    review_run_id: str | None,
+    review_manifest_sha256: str | None,
+    review_commitment: str | None,
+    max_candidates: int,
+    max_profile_candidates: int,
 ) -> dict[str, Any]:
     candidate = selected.candidate
     return {
@@ -801,11 +1164,20 @@ def _manifest_metadata(
             "acknowledged": True,
             "reference": consent_reference,
             "scope": "face-search-and-public-post-evidence",
+            "profile_discovery_authorized": profile_discovery_authorized,
+            "profile_platforms": (
+                sorted(profile_platforms)
+                if profile_discovery_authorized and profile_platforms
+                else []
+            ),
         },
         "query_face": _face_metadata(query_encoding),
         "search": {
             "provider": search_run.provider,
             "search_id": search_run.search_id,
+            "search_ids": list(search_run.search_ids),
+            "search_types": list(search_run.search_types),
+            "search_mode": search_mode,
             "retrieved_at": search_run.retrieved_at,
             "live": search_run.live,
             "provider_mode": search_run.provider_mode,
@@ -813,6 +1185,13 @@ def _manifest_metadata(
             "web_label_interpretation": "unverified-provider-derived-search-hint",
             "query_strategy": search_query_strategy,
             "candidate_count": len(search_run.candidates),
+            "post_candidate_limit": max_candidates,
+            "profile_candidate_limit": max_profile_candidates,
+            "platform_filter": sorted(platforms) if platforms else [],
+            "platform_filter_mode": "explicit" if platforms is not None else "all",
+            "profile_lead_count": profile_candidate_count,
+            "profile_lead_evaluated_count": len(profile_evaluations),
+            "face_matched_profile_lead_count": sum(item.matched for item in profile_evaluations),
         },
         "selection": {
             "rank": candidate.rank,
@@ -836,6 +1215,9 @@ def _manifest_metadata(
             "human_review": {
                 "approved_for_anchor": bool(approved_post_url),
                 "approved_post_url": approved_post_url,
+                "discovery_run_id": review_run_id,
+                "discovery_manifest_sha256": review_manifest_sha256,
+                "discovery_commitment": review_commitment,
             },
         },
         "capture": {
@@ -990,6 +1372,9 @@ __all__ = [
     "LocalVerificationResult",
     "PipelineError",
     "PipelineResult",
+    "RecoveredAnchorResult",
+    "anchor_submission_path",
+    "recover_pending_anchor",
     "run_pipeline",
     "run_tamper_demo",
     "verify_run",

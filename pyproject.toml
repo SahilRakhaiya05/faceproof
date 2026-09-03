@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "faceproof"
-version = "0.2.1"
+version = "0.3.0"
 description = "Consent-first face-to-web discovery with tamper-evident blockchain verification."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,15 +12,18 @@ license = { text = "MIT" }
 authors = [{ name = "HH Goa 2026 Task 3 Team" }]
 dependencies = [
   "eth-abi>=5.2,<6",
+  "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
   "jsonschema>=4.25,<5",
   "numpy>=2.0,<3",
   "opencv-python-headless>=4.11,<5",
   "pillow>=11,<13",
+  "python-multipart>=0.0.20,<1",
   "python-dotenv>=1.1,<2",
   "rfc8785>=0.1.4,<1",
   "rich>=14,<15",
   "typer>=0.16,<1",
+  "uvicorn>=0.35,<1",
   "web3>=7.12,<8",
 ]
 

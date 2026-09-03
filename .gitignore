@@ -29,6 +29,7 @@ contracts/.anvil/
 
 # Editors / OS
 .tools/
+.playwright-cli/
 .idea/
 .vscode/
 .DS_Store

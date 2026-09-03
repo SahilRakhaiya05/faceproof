@@ -52,6 +52,32 @@ The blockchain stores only an opaque 32-byte commitment. Raw face images,
 biometric embeddings, usernames, post text, URLs, and API responses remain
 off-chain.
 
+### Search modes and platform capability
+
+The local console and CLI expose two live SerpApi Lens modes:
+
+- **Standard** sends one `all` Lens request and uses one SerpApi search credit.
+- **Deep** sends separate `exact_matches` and `visual_matches` requests and uses
+  two SerpApi search credits. It can improve coverage, but does not guarantee a
+  result.
+
+The image upload and SerpApi account/quota check do not themselves consume a
+Lens search credit. Lens searches the public web globally; the platform choices
+in FaceProof only filter which returned URLs are evaluated locally.
+
+X, Reddit, YouTube, and Bluesky have supported public post-capture paths and can
+complete the post-validation stage when their public response supplies the
+required permalink and media evidence. LinkedIn, Instagram, Facebook, and
+TikTok are **discovery leads only** because FaceProof deliberately does not log
+in, scrape around access controls, or automate their restricted pages. Results
+from those four platforms cannot satisfy the matching-post requirement or be
+anchored by this implementation.
+
+LinkedIn profile checking is a separate, explicit opt-in. It evaluates only a
+Lens-returned public profile thumbnail as an investigative lead. A profile lead
+is never treated as identity proof, a matching social-media post, or
+anchor-eligible evidence.
+
 ## Requirements
 
 - Python 3.11 or newer
@@ -83,6 +109,32 @@ For a final demo, set `FACEPROOF_SOURCE_REVISION` to the exact output of
 `git rev-parse HEAD`, then require every readiness gate with
 `uv run faceproof doctor --demo`.
 
+### Local judge console
+
+Launch the polished local workflow from the repository root:
+
+```powershell
+uv run faceproof web
+```
+
+The console opens at `http://127.0.0.1:8787` and binds only to this computer.
+Do not proxy it or expose it to a LAN or the public internet. It guides the
+operator through the consent gates, image selection, Standard or Deep live
+search, candidate review, evidence verification, download, and tamper test.
+
+Anchoring in the console is intentionally a two-pass operation:
+
+1. Run an unanchored live discovery and inspect the dynamically returned post.
+2. Select **Review & prepare anchor** for that exact permalink.
+3. Re-acknowledge the irreversible commitment and run a second fresh,
+   cache-disabled search.
+4. Anchor only if the approved URL reappears and passes the local face,
+   permalink, capture, and post-media gates again.
+
+The second pass consumes another one or two SerpApi credits according to the
+search mode recorded by the reviewed discovery. Closing the console does not
+make an incomplete run successful; inspect the evidence history after restart.
+
 ### Discover, review, then run the full pipeline
 
 Put a consented local image at `samples/consented-person.jpg` (the directory is
@@ -91,7 +143,8 @@ the dynamically returned permalink:
 
 ```powershell
 uv run faceproof run --image .\samples\consented-person.jpg `
-  --live --i-have-consent --skip-anchor
+  --live --i-have-consent --skip-anchor `
+  --search-mode standard
 ```
 
 After reviewing the selected post and evidence directory, run a fresh live
@@ -105,8 +158,14 @@ SerpApi Google Lens with cache explicitly disabled:
 uv run faceproof run --image .\samples\consented-person.jpg `
   --live --i-have-consent `
   --consent-reference "volunteer-a-2026-09" `
+  --review-run-id "<discovery-run-id>" `
   --approve-post-url "https://www.reddit.com/r/example/comments/abc/example"
 ```
+
+Use `--search-mode deep` when the extra exact-plus-visual query is worth two
+credits. To show optional LinkedIn profile leads, add
+`--check-linkedin-profiles`; those leads remain in a separate, non-anchorable
+section and cannot make an otherwise inconclusive run pass.
 
 Development without a blockchain write is deliberately explicit:
 
@@ -178,6 +237,20 @@ Each `evidence/<run-id>/` directory contains:
 The chain receipt is intentionally excluded from the pre-anchor manifest to
 avoid circular hashing.
 
+Before broadcasting, FaceProof atomically journals the signed transaction hash,
+signer, nonce, chain, contract, and commitment in a sibling
+`.RUN_ID.anchor-submission.json` file. It contains no private key, raw signed
+transaction, or RPC credential. If the RPC times out after submission, do not
+start another anchor. Use the console's **Recover exact transaction** action or:
+
+```powershell
+uv run faceproof recover-anchor .\evidence\RUN_ID
+```
+
+Recovery is read-only on-chain: it never signs or broadcasts. It accepts only
+the saved transaction hash after checking its signer, nonce, calldata, receipt,
+event, registry record, contract bytecode, and confirmations.
+
 The raw provider body itself is not retained because it may echo credentials;
 the digest identifies those received bytes but cannot reconstruct them.
 
@@ -219,8 +292,8 @@ fall back to those responses from a live run.
 ## Demo checklist
 
 1. Show the consented input and current time.
-2. Show the reviewed permalink, then run the fresh anchor command with `--live`
-   and `--approve-post-url`.
+2. Open `faceproof web`, run discovery, show the reviewed permalink, then run
+   the fresh anchor pass for that exact URL.
 3. Show detection, quality result, model fingerprints and embedding fingerprint.
 4. Show provider search ID, timestamp and dynamically returned candidates.
 5. Show the unverified web label, selected post title/source, exact matched
@@ -241,8 +314,9 @@ as a live search.
 - Multiple/no-face and low-quality inputs fail closed.
 - Provider results are independently re-matched; provider scores are not trusted
   as identity proof.
-- Profiles/homepages are rejected: only recognized post permalinks with stable
-  IDs are eligible.
+- Profiles/homepages cannot satisfy Task 3: only recognized, capture-capable
+  post permalinks with stable IDs can become anchor-eligible. Opted-in LinkedIn
+  profiles remain separately labelled leads.
 - An anchored run requires successful public post-identity capture and explicit
   approval of the exact permalink.
 - Remote evidence requires HTTPS and rejects private/local network addresses.
@@ -275,6 +349,10 @@ product, paper, and comparable-project review is in
   anchored submission runs fail closed unless captured post media is
   independently re-matched. X commonly falls into this category; prefer a
   consented public YouTube, Reddit, or Bluesky result for the anchored demo.
+- LinkedIn, Instagram, Facebook, and TikTok may appear in genuine Lens results,
+  but this implementation treats them only as discovery leads and does not
+  automate their restricted post pages. They cannot complete or anchor the
+  matching-post claim.
 - A testnet can be reset or retired and is not permanent or legal-grade storage.
 - Base Sepolia proves public inclusion and integrity, not the truth of off-chain
   claims.

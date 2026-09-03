@@ -22,8 +22,11 @@ from eth_account import Account
 from web3 import Web3
 
 from faceproof.chain import (
+    SUBMISSION_SCHEMA,
+    AnchorSubmission,
     ChainError,
     anchor_commitment,
+    recover_anchor_receipt,
     verify_commitment_on_chain,
 )
 from faceproof.config import Settings
@@ -45,9 +48,15 @@ MNEMONIC = "test test test test test test test test test test test junk"
 
 
 def _required_tool(name: str) -> str:
-    executable = shutil.which(name)
+    configured = os.getenv(f"FACEPROOF_{name.upper()}_PATH")
+    executable = configured or shutil.which(name)
     if executable is None:
-        pytest.fail(f"{name} is required when FACEPROOF_RUN_ANVIL_INTEGRATION=1")
+        pytest.fail(
+            f"{name} is required when FACEPROOF_RUN_ANVIL_INTEGRATION=1; set "
+            f"FACEPROOF_{name.upper()}_PATH when it is not on PATH"
+        )
+    if not Path(executable).is_file():
+        pytest.fail(f"configured {name} executable does not exist: {executable}")
     return executable
 
 
@@ -180,6 +189,27 @@ def test_deploy_anchor_fresh_verify_and_tamper_rejection(tmp_path: Path) -> None
             expected_code_hash=expected_code_hash,
         )
         saved_receipt = anchor_receipt.to_dict()
+        anchored_transaction = deployment_web3.eth.get_transaction(anchor_receipt.transaction_hash)
+        recovered_receipt = recover_anchor_receipt(
+            commitment,
+            submission=AnchorSubmission(
+                schema=SUBMISSION_SCHEMA,
+                chain_id=CHAIN_ID,
+                contract_address=contract_address,
+                commitment=anchor_receipt.commitment,
+                transaction_hash=anchor_receipt.transaction_hash,
+                submitter=deployer.address,
+                nonce=int(anchored_transaction["nonce"]),
+            ),
+            rpc_url=rpc_url,
+            expected_chain_id=CHAIN_ID,
+            contract_address=contract_address,
+            expected_submitter=deployer.address,
+            confirmations=1,
+            timeout_seconds=15,
+            expected_code_hash=expected_code_hash,
+        )
+        assert recovered_receipt == anchor_receipt
         (run_dir / "chain-receipt.json").write_text(
             json.dumps(saved_receipt, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",

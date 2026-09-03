@@ -44,29 +44,83 @@ uv run faceproof models download
 uv run faceproof doctor --no-check-rpc
 ```
 
+FaceProof offers two live Lens modes:
+
+- **Standard** makes one `all` request and uses one SerpApi search credit.
+- **Deep** makes separate `exact_matches` and `visual_matches` requests and uses
+  two SerpApi search credits.
+
+Every anchor attempt repeats the reviewed discovery as a fresh, cache-disabled
+search, so budget another one or two credits for the second pass. Deep mode can
+increase candidate coverage but does not guarantee a match. The image upload
+and account/quota check do not themselves consume a Lens search credit.
+
 ## 3. Prepare a lawful, discoverable test
 
 Use an adult volunteer who gave purpose-specific consent. Put a clear,
 front-facing scan in `samples/consented-person.jpg`. The image must contain
 exactly one sufficiently large, sharp face.
 
-Use a real public Reddit, Bluesky, YouTube, Instagram, TikTok, LinkedIn,
-Facebook, or X post controlled or authorized by the volunteer. The post should
-contain the same image, a crop, or a compressed copy. Google must already have
-indexed it. A private, login-only, or newly published post is not a reliable
-demo target.
+Use a real public X, Reddit, YouTube, or Bluesky post controlled or authorized
+by the volunteer. Those platforms have supported public capture paths and can
+complete post validation when the public response exposes the required
+permalink and media. The post should contain the same image, a crop, or a
+compressed copy, and Google must already have indexed it. A private,
+login-only, or newly published post is not a reliable demo target.
+
+LinkedIn, Instagram, Facebook, and TikTok may still appear in genuine Lens
+results, but FaceProof treats them as **discovery leads only**. It does not log
+in, bypass access controls, or automate those restricted pages, so their posts
+cannot satisfy or anchor the Task 3 matching-post claim. For the most reliable
+anchored demo, prepare a consented public Reddit, YouTube, or Bluesky post and
+keep a second indexed example available.
 
 The post URL is not built into the code. SerpApi directly uploads the input,
 runs a fresh Google Lens query with cache disabled, and returns candidates.
 FaceProof then independently downloads and compares the candidate media with
 the local SFace embedding.
 
-Run discovery first:
+Lens searches globally. The platform choices in FaceProof filter returned URLs
+for local evaluation; they do not restrict what Google Lens searches or what
+may appear in the preserved provider response.
+
+### Recommended: use the localhost judge console
+
+From the repository root, launch:
+
+```powershell
+uv run faceproof web
+```
+
+It opens `http://127.0.0.1:8787` and listens only on this computer. Keep it
+local; do not expose it through a proxy, LAN binding, or public tunnel. The
+console presents consent, readiness, Standard/Deep selection, live progress,
+candidate evidence, verification, private bundle download, and the tamper test
+in one workflow.
+
+Choose **Discover** first. Review the selected permalink and evidence, then use
+**Review & prepare anchor**. After the chain setup in the next section, the
+console runs a second fresh search using the reviewed discovery's search policy
+and exact input image. The URL must reappear and independently pass the face,
+permalink, capture, and post-media gates before any blockchain write occurs.
+
+Public LinkedIn profile leads are disabled by default. The separate opt-in
+checks only thumbnails returned by Lens; it never logs into or scrapes LinkedIn.
+A matching profile thumbnail remains an unverified lead and can never count as
+the required post or become anchor-eligible.
+
+The CLI remains available for scripted runs. Run discovery first:
 
 ```powershell
 uv run faceproof run --image .\samples\consented-person.jpg `
-  --live --i-have-consent --skip-anchor
+  --live --i-have-consent --skip-anchor `
+  --search-mode standard
 ```
+
+Use `--search-mode deep` for the two-credit exact-plus-visual search. Add
+`--check-linkedin-profiles` only when the volunteer explicitly authorized that
+extra profile-lead check; it cannot change an inconclusive post result into a
+successful one.
 
 Review the returned stable post permalink and its evidence directory. An
 `INCONCLUSIVE` result means the live index or public capture did not produce an
@@ -138,14 +192,25 @@ uv run faceproof doctor --demo
 
 ## 5. Run, anchor, and independently verify
 
-Run a fresh search and approve only the permalink returned by the discovery
-run. The command still fails unless that URL is returned and face-matched again
+The recommended console flow is:
+
+1. Complete an unanchored **Discover** run.
+2. Open the selected public post and review its exact permalink and evidence.
+3. Choose **Review & prepare anchor** and acknowledge the irreversible opaque
+   commitment.
+4. Run the second fresh search. FaceProof writes to the chain only if the same
+   post is returned and all local and public-capture checks pass again.
+
+For the CLI alternative, run a fresh search and approve only the permalink
+returned by the discovery run. Supply that discovery run ID as provenance. The
+command still fails unless the approved URL is returned and face-matched again
 in this fresh request.
 
 ```powershell
 uv run faceproof run --image .\samples\consented-person.jpg `
   --live --i-have-consent `
   --consent-reference "volunteer-a-2026-09" `
+  --review-run-id "DISCOVERY_RUN_ID" `
   --approve-post-url "https://the-real-discovered-social-post"
 ```
 
@@ -159,6 +224,19 @@ uv run faceproof verify .\evidence\RUN_ID `
   --expected-tx 0xTRANSACTION_HASH
 uv run faceproof tamper-demo .\evidence\RUN_ID
 ```
+
+If an RPC timeout occurs after the transaction was signed, FaceProof reports
+`anchor-pending` and preserves a non-secret recovery journal beside the run
+directory. Do **not** repeat the anchor command. In the console choose
+**Recover exact transaction**, or run:
+
+```powershell
+uv run faceproof recover-anchor .\evidence\RUN_ID
+```
+
+This path only polls and validates the journaled transaction hash; it cannot
+sign or rebroadcast a replacement transaction. The journal is removed only
+after the recovered receipt passes an independent chain read-back.
 
 ## Required values
 

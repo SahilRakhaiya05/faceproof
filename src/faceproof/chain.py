@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -56,6 +56,7 @@ EVIDENCE_REGISTRY_ABI: list[dict[str, Any]] = [
 ]
 
 RECEIPT_SCHEMA = "faceproof-chain-receipt-v1"
+SUBMISSION_SCHEMA = "faceproof-chain-submission-v1"
 MAX_ANCHOR_GAS = 250_000
 MAX_FEE_PER_GAS_WEI = 100_000_000_000  # 100 gwei
 MAX_PRIORITY_FEE_PER_GAS_WEI = 5_000_000_000  # 5 gwei
@@ -65,6 +66,33 @@ _FALLBACK_PRIORITY_FEE_WEI = 1_000_000  # 0.001 gwei
 
 class ChainError(RuntimeError):
     """Raised when an evidence anchor cannot be written or independently read."""
+
+
+@dataclass(frozen=True, slots=True)
+class AnchorSubmission:
+    """Non-secret state needed to recover one exact signed transaction."""
+
+    schema: str
+    chain_id: int
+    contract_address: str
+    commitment: str
+    transaction_hash: str
+    submitter: str
+    nonce: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class AnchorPendingError(ChainError):
+    """Raised after signing when callers must recover instead of rebroadcasting."""
+
+    def __init__(self, message: str, submission: AnchorSubmission) -> None:
+        self.submission = submission
+        super().__init__(
+            f"{message}; recover signed transaction {submission.transaction_hash} "
+            "without rebroadcasting"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +199,17 @@ def anchor_commitment(
     gas_limit_cap: int = MAX_ANCHOR_GAS,
     fee_per_gas_cap: int = MAX_FEE_PER_GAS_WEI,
     priority_fee_cap: int = MAX_PRIORITY_FEE_PER_GAS_WEI,
+    on_submission: Callable[[AnchorSubmission], None] | None = None,
 ) -> AnchorReceipt:
+    """Sign, persist recoverable metadata, broadcast, and verify an anchor.
+
+    ``on_submission`` runs after signing but before broadcast. A caller can use
+    it to atomically persist :class:`AnchorSubmission`; if persistence fails,
+    no transaction is sent. After an ambiguous broadcast, receipt timeout, or
+    confirmation timeout, :class:`AnchorPendingError` exposes the same state so
+    the exact transaction can be recovered with :func:`recover_anchor_receipt`.
+    """
+
     commitment_bytes = parse_bytes32(commitment)
     _require_positive_int(expected_chain_id, "expected_chain_id")
     _require_positive_int(confirmations, "confirmations")
@@ -244,74 +282,122 @@ def anchor_commitment(
         signed = account.sign_transaction(built)
         raw_transaction = getattr(signed, "raw_transaction", None) or signed.rawTransaction
         signed_hash = _parse_bytes32(signed.hash, field="Signed transaction hash")
-        transaction_hash = web3.eth.send_raw_transaction(raw_transaction)
-        if _parse_bytes32(transaction_hash, field="RPC transaction hash") != signed_hash:
-            raise ChainError("RPC returned a transaction hash different from the signed payload")
-        receipt = web3.eth.wait_for_transaction_receipt(
-            transaction_hash, timeout=timeout_seconds, poll_latency=0.5
+        raw_hash = bytes(Web3.keccak(bytes(raw_transaction)))
+        if raw_hash != signed_hash:
+            raise ChainError(
+                "Signed transaction hash does not match the serialized transaction bytes"
+            )
+        submission = AnchorSubmission(
+            schema=SUBMISSION_SCHEMA,
+            chain_id=actual_chain_id,
+            contract_address=contract.address,
+            commitment=bytes32_hex(commitment_bytes),
+            transaction_hash=bytes32_hex(raw_hash),
+            submitter=Web3.to_checksum_address(account.address),
+            nonce=nonce,
         )
-    except TimeExhausted as exc:
-        raise ChainError("Timed out waiting for the anchor transaction receipt") from exc
     except ChainError:
         raise
     except Exception as exc:
         raise ChainError(
-            f"Anchor transaction failed via {rpc_label} ({type(exc).__name__})"
+            f"Could not build and sign anchor transaction via {rpc_label} ({type(exc).__name__})"
         ) from exc
 
-    try:
-        if (
-            _parse_bytes32(receipt["transactionHash"], field="Receipt transaction hash")
-            != signed_hash
-        ):
-            raise ChainError("Receipt transaction hash did not match the signed transaction")
-        receipt_status = _strict_int(receipt["status"], "receipt status", minimum=0)
-        receipt_block_number = _strict_int(
-            receipt["blockNumber"], "receipt block number", minimum=0
-        )
-        receipt_block_hash = _parse_bytes32(receipt["blockHash"], field="Receipt block hash")
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ChainError("RPC returned a malformed transaction receipt") from exc
-    if receipt_status != 1:
-        raise ChainError(f"Anchor transaction reverted: {transaction_hash.hex()}")
+    if on_submission is not None:
+        try:
+            on_submission(submission)
+        except Exception as exc:
+            raise ChainError(
+                "Could not persist recoverable anchor state "
+                f"({type(exc).__name__}); transaction was not broadcast"
+            ) from None
 
-    confirmations_observed = _wait_for_confirmations(
-        web3,
-        receipt_block_number,
-        confirmations,
-        deadline=time.monotonic() + timeout_seconds,
+    try:
+        returned_hash = web3.eth.send_raw_transaction(raw_transaction)
+    except Exception as exc:
+        raise AnchorPendingError(
+            f"Anchor broadcast outcome is unknown via {rpc_label} ({type(exc).__name__})",
+            submission,
+        ) from None
+    try:
+        returned_hash_bytes = _parse_bytes32(returned_hash, field="RPC transaction hash")
+    except ChainError:
+        raise AnchorPendingError("RPC returned a malformed transaction hash", submission) from None
+    if returned_hash_bytes != raw_hash:
+        raise AnchorPendingError(
+            "RPC returned a transaction hash different from the signed payload",
+            submission,
+        )
+
+    return _wait_and_finalize_submission(
+        web3=web3,
+        contract=contract,
+        commitment=commitment_bytes,
+        submission=submission,
+        confirmations=confirmations,
+        timeout_seconds=timeout_seconds,
     )
-    try:
-        canonical = _read_canonical_anchor(
-            web3=web3,
-            contract=contract,
-            commitment=commitment_bytes,
-            transaction_hash=signed_hash,
-            expected_chain_id=actual_chain_id,
-            expected_sender=account.address,
-        )
-    except ChainError:
-        raise
-    except Exception as exc:
-        raise ChainError(
-            f"Could not validate mined anchor via {rpc_label} ({type(exc).__name__})"
-        ) from exc
-    if canonical.block_number != receipt_block_number or canonical.block_hash != receipt_block_hash:
-        raise ChainError("Anchor receipt changed after a chain reorganization")
 
-    return AnchorReceipt(
-        schema=RECEIPT_SCHEMA,
-        chain_id=actual_chain_id,
-        rpc_network=_network_name(actual_chain_id),
-        contract_address=contract.address,
-        commitment=bytes32_hex(commitment_bytes),
-        transaction_hash=bytes32_hex(canonical.transaction_hash),
-        block_number=canonical.block_number,
-        block_hash=bytes32_hex(canonical.block_hash),
-        transaction_status=canonical.status,
-        submitter=canonical.submitter,
-        chain_timestamp=canonical.timestamp,
-        confirmations_observed=confirmations_observed,
+
+def recover_anchor_receipt(
+    commitment: str | bytes,
+    *,
+    submission: AnchorSubmission | Mapping[str, Any],
+    rpc_url: str,
+    expected_chain_id: int,
+    contract_address: str,
+    expected_submitter: str,
+    confirmations: int = 1,
+    timeout_seconds: float = 120,
+    expected_code_hash: str | bytes | None = None,
+) -> AnchorReceipt:
+    """Recover and verify one exact previously signed transaction without sending.
+
+    ``expected_submitter`` must come from trusted configuration, rather than the
+    recoverable state itself. Recovery binds the saved transaction hash, nonce,
+    signer, chain, registry, commitment, calldata, receipt, event, and registry
+    record. It never calls ``send_raw_transaction`` and never falls back to an
+    arbitrary transaction merely because the commitment exists in registry
+    state.
+    """
+
+    commitment_bytes = parse_bytes32(commitment)
+    _require_positive_int(expected_chain_id, "expected_chain_id")
+    _require_positive_int(confirmations, "confirmations")
+    _require_positive_number(timeout_seconds, "timeout_seconds")
+    recovered = _validated_submission(
+        submission,
+        commitment=commitment_bytes,
+        expected_chain_id=expected_chain_id,
+        contract_address=contract_address,
+        expected_submitter=expected_submitter,
+    )
+
+    rpc_label = _redacted_rpc_url(rpc_url)
+    try:
+        web3 = make_web3(rpc_url, timeout_seconds=min(timeout_seconds, 30))
+        connected = web3.is_connected()
+        actual_chain_id = int(web3.eth.chain_id) if connected else 0
+    except Exception as exc:
+        raise AnchorPendingError(
+            f"Could not connect to RPC {rpc_label} ({type(exc).__name__})",
+            recovered,
+        ) from None
+    if not connected:
+        raise AnchorPendingError(f"Could not connect to RPC {rpc_label}", recovered)
+    if actual_chain_id != expected_chain_id:
+        raise ChainError(
+            f"Wrong chain: RPC returned {actual_chain_id}, expected {expected_chain_id}"
+        )
+
+    contract = registry_contract(web3, contract_address, expected_code_hash=expected_code_hash)
+    return _wait_and_finalize_submission(
+        web3=web3,
+        contract=contract,
+        commitment=commitment_bytes,
+        submission=recovered,
+        confirmations=confirmations,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -458,6 +544,148 @@ def _wait_for_confirmations(
         time.sleep(min(0.5, remaining))
 
 
+def _wait_and_finalize_submission(
+    *,
+    web3: Web3,
+    contract: Contract,
+    commitment: bytes,
+    submission: AnchorSubmission,
+    confirmations: int,
+    timeout_seconds: float,
+) -> AnchorReceipt:
+    transaction_hash = _parse_bytes32(
+        submission.transaction_hash, field="Submitted transaction hash"
+    )
+    try:
+        receipt = web3.eth.wait_for_transaction_receipt(
+            transaction_hash, timeout=timeout_seconds, poll_latency=0.5
+        )
+    except TimeExhausted as exc:
+        raise AnchorPendingError(
+            "Timed out waiting for the anchor transaction receipt", submission
+        ) from exc
+    except Exception as exc:
+        raise AnchorPendingError(
+            f"Could not read the anchor transaction receipt ({type(exc).__name__})",
+            submission,
+        ) from None
+
+    try:
+        if (
+            _parse_bytes32(receipt["transactionHash"], field="Receipt transaction hash")
+            != transaction_hash
+        ):
+            raise ChainError("Receipt transaction hash did not match the signed transaction")
+        receipt_status = _strict_int(receipt["status"], "receipt status", minimum=0)
+        receipt_block_number = _strict_int(
+            receipt["blockNumber"], "receipt block number", minimum=0
+        )
+        receipt_block_hash = _parse_bytes32(receipt["blockHash"], field="Receipt block hash")
+    except (ChainError, KeyError, TypeError, ValueError) as exc:
+        raise AnchorPendingError(
+            "RPC returned a malformed transaction receipt", submission
+        ) from exc
+    if receipt_status == 0:
+        raise ChainError(f"Anchor transaction reverted: {submission.transaction_hash}")
+    if receipt_status != 1:
+        raise AnchorPendingError("RPC returned an unknown receipt status", submission)
+
+    try:
+        confirmations_observed = _wait_for_confirmations(
+            web3,
+            receipt_block_number,
+            confirmations,
+            deadline=time.monotonic() + timeout_seconds,
+        )
+    except ChainError as exc:
+        raise AnchorPendingError(str(exc), submission) from exc
+
+    try:
+        canonical = _read_canonical_anchor(
+            web3=web3,
+            contract=contract,
+            commitment=commitment,
+            transaction_hash=transaction_hash,
+            expected_chain_id=submission.chain_id,
+            expected_sender=submission.submitter,
+            expected_nonce=submission.nonce,
+        )
+    except ChainError as exc:
+        raise AnchorPendingError(f"Canonical anchor validation failed: {exc}", submission) from exc
+    except Exception as exc:
+        raise AnchorPendingError(
+            f"Could not validate mined anchor ({type(exc).__name__})", submission
+        ) from None
+    if canonical.block_number != receipt_block_number or canonical.block_hash != receipt_block_hash:
+        raise AnchorPendingError("Anchor receipt changed after a chain reorganization", submission)
+
+    return AnchorReceipt(
+        schema=RECEIPT_SCHEMA,
+        chain_id=submission.chain_id,
+        rpc_network=_network_name(submission.chain_id),
+        contract_address=submission.contract_address,
+        commitment=submission.commitment,
+        transaction_hash=bytes32_hex(canonical.transaction_hash),
+        block_number=canonical.block_number,
+        block_hash=bytes32_hex(canonical.block_hash),
+        transaction_status=canonical.status,
+        submitter=canonical.submitter,
+        chain_timestamp=canonical.timestamp,
+        confirmations_observed=confirmations_observed,
+    )
+
+
+def _validated_submission(
+    submission: AnchorSubmission | Mapping[str, Any],
+    *,
+    commitment: bytes,
+    expected_chain_id: int,
+    contract_address: str,
+    expected_submitter: str,
+) -> AnchorSubmission:
+    if isinstance(submission, AnchorSubmission):
+        saved = submission.to_dict()
+    elif isinstance(submission, Mapping):
+        saved = dict(submission)
+    else:
+        raise ChainError("Recoverable anchor state must be an object")
+
+    required = set(AnchorSubmission.__dataclass_fields__)
+    if set(saved) != required:
+        raise ChainError("Recoverable anchor state has missing or unexpected fields")
+    if _saved_str(saved, "schema") != SUBMISSION_SCHEMA:
+        raise ChainError("Recoverable anchor state uses an unsupported schema")
+    if _saved_int(saved, "chain_id", minimum=1) != expected_chain_id:
+        raise ChainError("Recoverable anchor state does not match the expected chain")
+    trusted_contract = _checksum_address(contract_address, "Expected contract address")
+    saved_contract = _checksum_address(
+        _saved_str(saved, "contract_address"), "Recoverable contract address"
+    )
+    if saved_contract != trusted_contract:
+        raise ChainError("Recoverable anchor state does not match the trusted registry")
+    if parse_bytes32(_saved_str(saved, "commitment")) != commitment:
+        raise ChainError("Recoverable anchor state does not match the commitment")
+
+    trusted_submitter = _checksum_address(expected_submitter, "Expected submitter")
+    saved_submitter = _checksum_address(_saved_str(saved, "submitter"), "Recoverable submitter")
+    if saved_submitter != trusted_submitter:
+        raise ChainError("Recoverable anchor state does not match the expected submitter")
+
+    transaction_hash = _parse_bytes32(
+        _saved_str(saved, "transaction_hash"), field="Recoverable transaction hash"
+    )
+    nonce = _saved_int(saved, "nonce", minimum=0)
+    return AnchorSubmission(
+        schema=SUBMISSION_SCHEMA,
+        chain_id=expected_chain_id,
+        contract_address=trusted_contract,
+        commitment=bytes32_hex(commitment),
+        transaction_hash=bytes32_hex(transaction_hash),
+        submitter=trusted_submitter,
+        nonce=nonce,
+    )
+
+
 def _verify_saved_receipt(
     *,
     web3: Web3,
@@ -537,6 +765,7 @@ def _read_canonical_anchor(
     transaction_hash: str | bytes,
     expected_chain_id: int,
     expected_sender: str | None = None,
+    expected_nonce: int | None = None,
 ) -> _CanonicalAnchor:
     tx_hash = _parse_bytes32(transaction_hash, field="Transaction hash")
     receipt = web3.eth.get_transaction_receipt(tx_hash)
@@ -575,6 +804,11 @@ def _read_canonical_anchor(
     sender = _checksum_address(transaction["from"], "transaction sender")
     if expected_sender is not None and sender != Web3.to_checksum_address(expected_sender):
         raise ChainError("Transaction sender does not match the expected submitter")
+    if expected_nonce is not None:
+        if "nonce" not in transaction:
+            raise ChainError("Transaction nonce is missing")
+        if _strict_int(transaction["nonce"], "transaction nonce", minimum=0) != expected_nonce:
+            raise ChainError("Transaction nonce does not match the recoverable state")
     if _checksum_address(transaction["to"], "transaction recipient") != contract.address:
         raise ChainError("Transaction was not sent to the trusted registry")
     if _strict_int(transaction["value"], "transaction value", minimum=0) != 0:

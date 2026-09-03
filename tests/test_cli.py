@@ -139,6 +139,109 @@ def test_successful_unanchored_run_renders_release_evidence(tmp_path: Path, monk
     assert observed["skip_anchor"] is True
 
 
+def test_anchor_cli_requires_a_reviewed_discovery_before_pipeline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "_settings",
+        lambda: SimpleNamespace(output_dir=tmp_path / "evidence"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "run_pipeline",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("pipeline must not run")),
+    )
+
+    result = runner.invoke(
+        cli_module.app,
+        [
+            "run",
+            "--image",
+            str(_input_file(tmp_path)),
+            "--live",
+            "--i-have-consent",
+            "--consent-reference",
+            "volunteer",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "requires --review-run-id" in result.output
+
+
+def test_anchor_cli_replays_reviewed_image_and_search_policy(tmp_path: Path, monkeypatch) -> None:
+    supplied = _input_file(tmp_path)
+    sealed = tmp_path / "evidence" / "reviewed" / "input" / "query.jpg"
+    sealed.parent.mkdir(parents=True)
+    sealed.write_bytes(b"sealed-reviewed-input")
+    settings = SimpleNamespace(output_dir=tmp_path / "evidence")
+    reviewed = SimpleNamespace(
+        image_path=sealed,
+        search_mode="deep",
+        platforms=frozenset({"x"}),
+        max_candidates=7,
+        max_profile_candidates=0,
+        profile_discovery_authorized=False,
+        profile_platforms=None,
+        manifest_sha256="0x" + "11" * 32,
+        commitment="0x" + "22" * 32,
+    )
+    run_dir = tmp_path / "anchored"
+    run_dir.mkdir()
+    expected = PipelineResult(
+        run_id="anchored",
+        run_dir=run_dir,
+        provider="serpapi",
+        search_id="search-2",
+        selected_url="https://x.com/person/status/123",
+        selected_title="Reviewed post",
+        selected_source="X",
+        selected_media_path=sealed,
+        web_labels=(),
+        local_similarity=0.9,
+        similarity_threshold=0.363,
+        manifest_sha256="0x" + "33" * 32,
+        commitment="0x" + "44" * 32,
+        chain_receipt=None,
+        chain_verification=None,
+    )
+    observed: dict[str, Any] = {}
+    monkeypatch.setattr(cli_module, "_settings", lambda: settings)
+    monkeypatch.setattr(cli_module, "load_reviewed_discovery", lambda **_kwargs: reviewed)
+
+    def fake_pipeline(**kwargs: Any) -> PipelineResult:
+        observed.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(cli_module, "run_pipeline", fake_pipeline)
+
+    result = runner.invoke(
+        cli_module.app,
+        [
+            "run",
+            "--image",
+            str(supplied),
+            "--live",
+            "--i-have-consent",
+            "--consent-reference",
+            "volunteer",
+            "--review-run-id",
+            "reviewed",
+            "--approve-post-url",
+            "https://x.com/person/status/123",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed["image_path"] == sealed
+    assert observed["search_mode"] == "deep"
+    assert observed["platforms"] == frozenset({"x"})
+    assert observed["max_candidates"] == 7
+    assert observed["review_manifest_sha256"] == "0x" + "11" * 32
+    assert observed["review_commitment"] == "0x" + "22" * 32
+
+
 def test_provider_display_text_is_safe_for_legacy_windows_encoding() -> None:
     rendered = cli_module._display_text("Mukesh Ambani — नाम", encoding="cp1252")
 

@@ -12,8 +12,10 @@ from faceproof.search import SearchError, SerpApiLensProvider, check_serpapi_acc
 from faceproof.search.base import (
     SearchCandidate,
     extract_post_id,
+    filter_profile_candidates,
     filter_social_candidates,
     is_social_post_url,
+    is_social_profile_url,
     is_social_url,
     normalize_page_url,
     redact_secrets,
@@ -103,6 +105,44 @@ def test_social_filter_rejects_profiles_and_homepages() -> None:
     assert [item.rank for item in filter_social_candidates(candidates)] == [3]
 
 
+def test_linkedin_profiles_are_leads_and_never_post_candidates() -> None:
+    profile = SearchCandidate(
+        "test",
+        1,
+        "https://www.linkedin.com/in/consented-volunteer/",
+        "https://www.linkedin.com/in/consented-volunteer/",
+    )
+    post = SearchCandidate(
+        "test",
+        2,
+        "https://www.linkedin.com/posts/consented-volunteer_demo-activity-123",
+        "https://www.linkedin.com/posts/consented-volunteer_demo-activity-123",
+    )
+
+    assert is_social_profile_url(profile.normalized_url)
+    assert not is_social_profile_url(post.normalized_url)
+    assert [item.rank for item in filter_profile_candidates([profile, post])] == [1]
+    assert [item.rank for item in filter_social_candidates([profile, post])] == [2]
+    assert filter_profile_candidates([profile], limit=0) == []
+
+
+def test_platform_filter_is_a_local_eligibility_filter() -> None:
+    linkedin = SearchCandidate(
+        "test",
+        1,
+        "https://linkedin.com/posts/person_activity-123",
+        "https://linkedin.com/posts/person_activity-123",
+    )
+    reddit = SearchCandidate(
+        "test",
+        2,
+        "https://reddit.com/r/pics/comments/abc/title",
+        "https://reddit.com/r/pics/comments/abc/title",
+    )
+    filtered = filter_social_candidates([linkedin, reddit], platforms=frozenset({"linkedin"}))
+    assert [item.rank for item in filtered] == [1]
+
+
 def test_serpapi_upload_and_live_lens_search(tmp_path: Path) -> None:
     image_path = tmp_path / "input.jpg"
     _write_jpeg(image_path)
@@ -156,6 +196,65 @@ def test_serpapi_upload_and_live_lens_search(tmp_path: Path) -> None:
     assert run.raw_response["search"]["search_parameters"]["api_key"] == "[REDACTED]"
     assert "raw_http_bodies" not in run.raw_response
     assert len(run.raw_response["raw_http_body_sha256"]["search"]) == 64
+
+
+def test_serpapi_deep_mode_queries_exact_and_visual_then_deduplicates(tmp_path: Path) -> None:
+    image_path = tmp_path / "input.jpg"
+    _write_jpeg(image_path)
+    requested_types: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/image":
+            return httpx.Response(200, json={"image_id": "image-deep"})
+        search_type = request.url.params["type"]
+        requested_types.append(search_type)
+        common = {
+            "search_metadata": {"id": f"lens-{search_type}", "status": "Success"},
+            "search_parameters": {
+                "engine": "google_lens",
+                "image_id": "image-deep",
+                "type": search_type,
+                "no_cache": "true",
+            },
+        }
+        if search_type == "exact_matches":
+            common["exact_matches"] = [
+                {
+                    "position": 1,
+                    "link": "https://linkedin.com/in/volunteer",
+                    "title": "Volunteer profile",
+                    "thumbnail": "https://images.example/exact.jpg",
+                }
+            ]
+        else:
+            common["visual_matches"] = [
+                {
+                    "position": 1,
+                    "link": "https://linkedin.com/in/volunteer",
+                    "title": "Duplicate profile",
+                },
+                {
+                    "position": 2,
+                    "link": "https://x.com/volunteer/status/123",
+                    "title": "Public post",
+                },
+            ]
+        return httpx.Response(200, json=common)
+
+    provider = SerpApiLensProvider(
+        "secret",
+        search_mode="deep",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    run = provider.search(image_path)
+
+    assert requested_types == ["exact_matches", "visual_matches"]
+    assert run.search_types == ("exact_matches", "visual_matches")
+    assert run.search_ids == ("lens-exact_matches", "lens-visual_matches")
+    assert len(run.candidates) == 2
+    assert run.candidates[0].exact_match is True
+    assert run.candidates[0].result_type == "exact_match"
+    assert run.candidates[1].result_type == "visual_match"
 
 
 def test_serpapi_rejects_non_success_search_status(tmp_path: Path) -> None:
