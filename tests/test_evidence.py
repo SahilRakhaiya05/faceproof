@@ -168,7 +168,7 @@ def test_commitment_matches_solidity_abi_bytes32_pair(
     assert record["salt"] == "0x" + FIXED_SALT.hex()
     assert record["commitment"] == "0x" + reference.hexdigest()
     assert record["abi_backend"] in {"eth_abi", "static-bytes32"}
-    assert record["keccak_backend"] in {"eth_hash", "pycryptodome", "web3"}
+    assert record["keccak_backend"] in {"eth_hash", "web3"}
 
 
 def test_random_salt_changes_commitment(monkeypatch: pytest.MonkeyPatch) -> None:

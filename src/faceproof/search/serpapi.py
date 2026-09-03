@@ -15,6 +15,7 @@ from .base import (
     SearchRun,
     extract_post_id,
     normalize_page_url,
+    redact_secrets,
 )
 
 
@@ -65,14 +66,15 @@ class SerpApiLensProvider:
                 files={"image": (upload_name, upload_bytes, media_type)},
             )
             upload_response.raise_for_status()
-            upload_raw = upload_response.text
+            upload_raw = bytes(upload_response.content)
             upload = upload_response.json()
         except httpx.HTTPError as exc:
             raise SearchError(f"SerpApi image upload failed: {_safe_http_error(exc)}") from exc
         except ValueError as exc:
             raise SearchError("SerpApi image upload returned invalid JSON") from exc
         if upload.get("error"):
-            raise SearchError(f"SerpApi image upload error: {upload['error']}")
+            error = redact_secrets(str(upload["error"]), secret_values=(self.api_key,))
+            raise SearchError(f"SerpApi image upload error: {error}")
         image_id = str(upload.get("image_id") or "")
         if not image_id:
             raise SearchError("SerpApi image upload did not return image_id")
@@ -90,14 +92,15 @@ class SerpApiLensProvider:
         try:
             search_response = self.client.get("https://serpapi.com/search.json", params=params)
             search_response.raise_for_status()
-            search_raw = search_response.text
+            search_raw = bytes(search_response.content)
             body = search_response.json()
         except httpx.HTTPError as exc:
             raise SearchError(f"SerpApi Lens request failed: {_safe_http_error(exc)}") from exc
         except ValueError as exc:
             raise SearchError("SerpApi Lens returned invalid JSON") from exc
         if body.get("error"):
-            raise SearchError(f"SerpApi Lens error: {body['error']}")
+            error = redact_secrets(str(body["error"]), secret_values=(self.api_key,))
+            raise SearchError(f"SerpApi Lens error: {error}")
         metadata = body.get("search_metadata") or {}
         if (
             not isinstance(metadata, dict)
@@ -149,9 +152,12 @@ class SerpApiLensProvider:
                     "base64": base64.b64encode(upload_bytes).decode("ascii"),
                     "metadata_stripped": True,
                 },
-                "upload": upload,
-                "search": body,
-                "raw_http_bodies": {"upload": upload_raw, "search": search_raw},
+                "upload": redact_secrets(upload, secret_values=(self.api_key,)),
+                "search": redact_secrets(body, secret_values=(self.api_key,)),
+                "raw_http_body_sha256": {
+                    "upload": hashlib.sha256(upload_raw).hexdigest(),
+                    "search": hashlib.sha256(search_raw).hexdigest(),
+                },
                 "request_parameters": sanitized_params,
             },
             live=self.no_cache,

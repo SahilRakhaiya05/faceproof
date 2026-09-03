@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -39,6 +40,57 @@ _TRACKING_KEYS = {
     "ref_url",
 }
 
+_SECRET_KEYS = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "authorization",
+        "access_token",
+        "accesstoken",
+        "refresh_token",
+        "refreshtoken",
+        "token",
+        "private_key",
+        "privatekey",
+        "client_secret",
+        "clientsecret",
+        "cookie",
+        "id_token",
+        "idtoken",
+        "password",
+        "passwd",
+        "session_token",
+        "sessiontoken",
+        "set_cookie",
+        "secret",
+    }
+)
+
+_SENSITIVE_QUERY_KEYS = frozenset(
+    {
+        "access_key",
+        "access_token",
+        "api_key",
+        "apikey",
+        "auth",
+        "authorization",
+        "awsaccesskeyid",
+        "credential",
+        "expires",
+        "googleaccessid",
+        "key",
+        "key_pair_id",
+        "policy",
+        "refresh_token",
+        "secret",
+        "sig",
+        "signature",
+        "token",
+    }
+)
+
+_URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+
 
 class SearchError(RuntimeError):
     """Raised when a provider request or response is invalid."""
@@ -64,7 +116,7 @@ class SearchCandidate:
         """Return serializable metadata without embedding bulky thumbnail bytes."""
         data = asdict(self)
         data.pop("thumbnail_base64", None)
-        return data
+        return redact_secrets(data)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,9 +163,12 @@ def normalize_page_url(url: str) -> str:
         raise ValueError(f"Expected a public HTTP(S) URL, got: {url!r}")
 
     hostname = parts.hostname.lower().rstrip(".")
+    is_known_social = any(
+        hostname == allowed or hostname.endswith(f".{allowed}") for allowed in SOCIAL_HOSTS
+    )
+    scheme = "https" if is_known_social else parts.scheme.lower()
     if parts.port and not (
-        (parts.scheme.lower() == "http" and parts.port == 80)
-        or (parts.scheme.lower() == "https" and parts.port == 443)
+        (scheme == "http" and parts.port == 80) or (scheme == "https" and parts.port == 443)
     ):
         netloc = f"{hostname}:{parts.port}"
     else:
@@ -122,22 +177,25 @@ def normalize_page_url(url: str) -> str:
     query_items = []
     for key, value in parse_qsl(parts.query, keep_blank_values=True):
         lower = key.lower()
-        if lower.startswith("utm_") or lower in _TRACKING_KEYS:
+        if lower.startswith("utm_") or lower in _TRACKING_KEYS or _is_sensitive_query_key(lower):
             continue
         query_items.append((key, value))
 
     path = re.sub(r"/{2,}", "/", parts.path or "/")
     if path != "/":
         path = path.rstrip("/")
-    return urlunsplit((parts.scheme.lower(), netloc, path, urlencode(query_items, doseq=True), ""))
+    return urlunsplit((scheme, netloc, path, urlencode(query_items, doseq=True), ""))
 
 
 def is_social_url(url: str) -> bool:
     try:
-        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower().rstrip(".")
     except ValueError:
         return False
-    return any(host == allowed or host.endswith(f".{allowed}") for allowed in SOCIAL_HOSTS)
+    return parts.scheme.lower() == "https" and any(
+        host == allowed or host.endswith(f".{allowed}") for allowed in SOCIAL_HOSTS
+    )
 
 
 def extract_post_id(url: str) -> str | None:
@@ -218,3 +276,68 @@ def filter_social_candidates(
         if limit is not None and len(result) >= limit:
             break
     return result
+
+
+def redact_secrets(value: Any, *, secret_values: tuple[str, ...] = ()) -> Any:
+    """Recursively redact credential fields and known secret values for evidence files."""
+    secrets = tuple(item for item in secret_values if len(item) >= 4)
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            normalized = str(key).casefold().replace("-", "_").replace(" ", "_")
+            if normalized in _SECRET_KEYS or _is_sensitive_query_key(normalized):
+                redacted[key] = "[REDACTED]"
+            else:
+                redacted[key] = redact_secrets(item, secret_values=secrets)
+        return redacted
+    if isinstance(value, list):
+        return [redact_secrets(item, secret_values=secrets) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_secrets(item, secret_values=secrets) for item in value)
+    if isinstance(value, str):
+        result = value
+        for secret in secrets:
+            result = result.replace(secret, "[REDACTED]")
+        if result.lower().startswith(("http://", "https://")):
+            return redact_url_secrets(result)
+        return _URL_IN_TEXT.sub(
+            lambda match: redact_url_secrets(html.unescape(match.group(0))), result
+        )
+    return value
+
+
+def redact_url_secrets(url: str) -> str:
+    """Remove user info and redact credential/signature-like URL query values."""
+
+    try:
+        parts = urlsplit(url)
+        if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+            return url
+        hostname = parts.hostname.lower().rstrip(".")
+        port = parts.port
+    except ValueError:
+        return "[REDACTED INVALID URL]"
+    default_port = 443 if parts.scheme.lower() == "https" else 80
+    netloc = hostname if port in {None, default_port} else f"{hostname}:{port}"
+    query_items = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        sanitized = "[REDACTED]" if _is_sensitive_query_key(key) else value
+        query_items.append((key, sanitized))
+    return urlunsplit(
+        (
+            parts.scheme.lower(),
+            netloc,
+            parts.path,
+            urlencode(query_items, doseq=True),
+            "",
+        )
+    )
+
+
+def _is_sensitive_query_key(key: str) -> bool:
+    normalized = key.casefold().replace("-", "_").replace(".", "_")
+    return (
+        normalized in _SENSITIVE_QUERY_KEYS
+        or normalized.startswith("x_amz_")
+        or normalized.endswith(("_credential", "_key", "_secret", "_signature", "_token"))
+    )

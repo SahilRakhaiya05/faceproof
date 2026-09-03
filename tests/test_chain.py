@@ -11,6 +11,7 @@ from web3 import Web3
 import faceproof.chain as chain
 from faceproof.chain import (
     ChainError,
+    ChainVerification,
     bytes32_hex,
     explorer_transaction_url,
     parse_bytes32,
@@ -159,6 +160,8 @@ def _verify_fixture(
     web3: Any,
     contract: _FakeContract,
     saved: dict[str, Any],
+    *,
+    required_confirmations: int = 1,
 ) -> bool | None:
     return chain._verify_saved_receipt(
         web3=web3,
@@ -167,6 +170,7 @@ def _verify_fixture(
         expected_chain_id=84532,
         saved=saved,
         expected_record=(SUBMITTER, BLOCK_TIMESTAMP, BLOCK_NUMBER),
+        required_confirmations=required_confirmations,
     )
 
 
@@ -208,6 +212,26 @@ def test_bytes32_hex_enforces_commitment_rules() -> None:
 def test_base_sepolia_explorer_url() -> None:
     assert explorer_transaction_url(84532, "0xabc") == "https://sepolia.basescan.org/tx/0xabc"
     assert explorer_transaction_url(31337, "0xabc") is None
+
+
+def test_chain_verdict_requires_an_explicit_confirmation_result() -> None:
+    unconfirmed = ChainVerification(
+        connected=True,
+        chain_id_matches=True,
+        anchored=True,
+        commitment=bytes32_hex(COMMITMENT),
+    )
+    confirmed = ChainVerification(
+        connected=True,
+        chain_id_matches=True,
+        anchored=True,
+        commitment=bytes32_hex(COMMITMENT),
+        confirmations_observed=1,
+        confirmations_satisfied=True,
+    )
+
+    assert not unconfirmed.passed
+    assert confirmed.passed
 
 
 class _CodeEth:
@@ -315,6 +339,15 @@ def test_legacy_gas_price_is_bounded() -> None:
 def test_complete_canonical_receipt_is_accepted() -> None:
     web3, contract, saved, _state = _chain_fixture()
     assert _verify_fixture(web3, contract, saved) is True
+
+
+def test_trusted_confirmation_requirement_is_enforced() -> None:
+    web3, contract, saved, state = _chain_fixture()
+    state["head"] = BLOCK_NUMBER
+
+    assert _verify_fixture(web3, contract, saved, required_confirmations=2) is False
+    state["head"] = BLOCK_NUMBER + 1
+    assert _verify_fixture(web3, contract, saved, required_confirmations=2) is True
 
 
 @pytest.mark.parametrize(

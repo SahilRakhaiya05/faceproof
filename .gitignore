@@ -5,6 +5,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .coverage
+coverage.json
+bandit-report.json
+audit-requirements.txt
 htmlcov/
 dist/
 build/
@@ -16,6 +19,7 @@ evidence/*
 !evidence/.gitkeep
 samples/*
 !samples/README.md
+benchmark-data/
 
 # Solidity build products and local state
 contracts/cache/

@@ -18,7 +18,13 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 from PIL import Image
 
-from .search.base import SearchCandidate, extract_post_id, is_social_post_url
+from .search.base import (
+    SearchCandidate,
+    extract_post_id,
+    is_social_post_url,
+    redact_secrets,
+    redact_url_secrets,
+)
 
 
 class CaptureError(RuntimeError):
@@ -81,6 +87,78 @@ _AUTOMATED_CAPTURE_DISABLED_HOSTS = (
     "tiktok.com",
 )
 
+_PLATFORM_SUFFIXES = {
+    "bsky": ("bsky.app",),
+    "facebook": ("facebook.com",),
+    "instagram": ("instagram.com",),
+    "linkedin": ("linkedin.com",),
+    "reddit": ("reddit.com",),
+    "tiktok": ("tiktok.com",),
+    "x": ("x.com", "twitter.com"),
+    "youtube": ("youtube.com", "youtu.be"),
+}
+
+
+def _host_matches(host: str, suffix: str) -> bool:
+    return host == suffix or host.endswith(f".{suffix}")
+
+
+def _platform_family(url: str) -> str | None:
+    try:
+        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    for family, suffixes in _PLATFORM_SUFFIXES.items():
+        if any(_host_matches(host, suffix) for suffix in suffixes):
+            return family
+    return None
+
+
+def _same_social_post(expected_url: str, observed_url: str) -> bool:
+    """Match a post ID only within the same social-platform family."""
+
+    try:
+        if any(urlsplit(url).scheme.lower() != "https" for url in (expected_url, observed_url)):
+            return False
+    except ValueError:
+        return False
+    expected_family = _platform_family(expected_url)
+    observed_family = _platform_family(observed_url)
+    if expected_family is None or observed_family != expected_family:
+        return False
+    try:
+        expected_id = extract_post_id(expected_url)
+        observed_id = extract_post_id(observed_url)
+    except ValueError:
+        return False
+    return bool(expected_id and observed_id and observed_id == expected_id)
+
+
+def _post_media_relationship(post_url: str, media_url: str) -> str | None:
+    """Classify only platform-specific content URLs as face-matchable post media."""
+
+    family = _platform_family(post_url)
+    try:
+        parts = urlsplit(media_url)
+        host = (parts.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    if parts.scheme.lower() != "https" or not host:
+        return None
+    if family == "x" and host in {"pbs.twimg.com", "video.twimg.com"}:
+        return "x-content-cdn"
+    if family == "reddit" and host in {
+        "i.redd.it",
+        "preview.redd.it",
+        "external-preview.redd.it",
+    }:
+        return "reddit-content-cdn"
+    if family == "youtube" and host in {"i.ytimg.com", "img.youtube.com"}:
+        return "youtube-video-thumbnail"
+    if family == "bsky" and host == "cdn.bsky.app" and parts.path.startswith("/img/feed_"):
+        return "bluesky-feed-media"
+    return None
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -134,7 +212,7 @@ def materialize_candidate_image(
                     )
                     break
                 except CaptureError as exc:
-                    failures.append(f"{url}: {exc}")
+                    failures.append(f"{redact_url_secrets(url)}: {exc}")
         finally:
             if owns_client:
                 http.close()
@@ -153,7 +231,7 @@ def materialize_candidate_image(
         sha256=hashlib.sha256(raw).hexdigest(),
         byte_size=len(raw),
         media_type=media_type,
-        source_url=source_url,
+        source_url=redact_url_secrets(source_url) if source_url else None,
     )
 
 
@@ -315,15 +393,15 @@ def fetch_public_bytes(
                         raise CaptureError(f"Response exceeds {max_bytes} bytes")
                 return bytes(output), media_type, current
         except httpx.HTTPError as exc:
-            raise CaptureError(f"HTTP fetch failed: {exc}") from exc
+            raise CaptureError(f"HTTP fetch failed ({type(exc).__name__})") from exc
     raise CaptureError(f"Too many redirects (>{max_redirects})")
 
 
 def validate_public_url(url: str) -> None:
     """Reject local/private network targets before evidence downloads."""
     parts = urlsplit(url)
-    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
-        raise CaptureError("Only HTTP(S) URLs are allowed")
+    if parts.scheme.lower() != "https" or not parts.hostname:
+        raise CaptureError("Only HTTPS URLs are allowed for remote evidence")
     if parts.username or parts.password:
         raise CaptureError("URLs containing credentials are not allowed")
     try:
@@ -377,23 +455,30 @@ def _capture_x_oembed(
         link_parser = _LinkParser()
         link_parser.feed(response_html)
         identity_urls.extend(link_parser.urls)
-    if not post_id or not any(extract_post_id(url) == post_id for url in identity_urls):
+    if not post_id or not any(
+        _same_social_post(candidate.normalized_url, url) for url in identity_urls
+    ):
         raise CaptureError("X oEmbed response did not identify the requested post")
 
+    captured_media: list[CapturedFile] = []
     media_artifacts: list[CapturedFile] = []
+    media_relationship: str | None = None
     thumbnail_url = body.get("thumbnail_url")
     if isinstance(thumbnail_url, str) and thumbnail_url:
-        # The post identity remains independently confirmed by oEmbed even
-        # when a platform does not expose a downloadable thumbnail.
+        resolved_thumbnail_url = urljoin(candidate.normalized_url, thumbnail_url)
         with suppress(CaptureError):
-            media_artifacts.append(
-                _capture_remote_image(
-                    thumbnail_url,
-                    destination / "post_media",
-                    client=client,
-                    validate_url=validate_url,
-                )
+            captured = _capture_remote_image(
+                resolved_thumbnail_url,
+                destination / "post_preview",
+                client=client,
+                validate_url=validate_url,
             )
+            captured_media.append(captured)
+            media_relationship = _post_media_relationship(
+                candidate.normalized_url, captured.source_url or resolved_thumbnail_url
+            )
+            if media_relationship is not None:
+                media_artifacts.append(captured)
 
     metadata = {
         "status": "captured",
@@ -402,15 +487,17 @@ def _capture_x_oembed(
         "post_id": post_id,
         "post_identity_verified": True,
         "captured_at": _now_iso(),
-        "response": body,
+        "response": redact_secrets(body),
         "response_headers": _safe_headers(response.headers),
-        "linked_media": [item.to_dict() for item in media_artifacts],
+        "linked_media": [item.to_dict() for item in captured_media],
+        "face_match_eligible_media": [item.to_dict() for item in media_artifacts],
+        "media_relationship": media_relationship or "page-preview-only",
     }
     artifact = _write_json_artifact(destination / "post_oembed.json", metadata)
     return PostCapture(
         status="captured",
         method="x-oembed",
-        artifacts=(artifact, *media_artifacts),
+        artifacts=(artifact, *captured_media),
         metadata=metadata,
         media_artifacts=tuple(media_artifacts),
     )
@@ -456,19 +543,18 @@ def _capture_public_html(
         sha256=hashlib.sha256(raw).hexdigest(),
         byte_size=len(raw),
         media_type=media_type,
-        source_url=final_url,
+        source_url=redact_url_secrets(final_url),
     )
 
     parser = _OpenGraphParser()
     decoded_html = raw.decode("utf-8", errors="replace")
     parser.feed(decoded_html)
     requested_post_id = extract_post_id(candidate.normalized_url)
-    final_post_id = extract_post_id(final_url)
-    if not requested_post_id or final_post_id != requested_post_id:
+    if not requested_post_id or not _same_social_post(candidate.normalized_url, final_url):
         raise CaptureError("Post capture redirected to a different or non-post URL")
     identity_url = parser.values.get("og:url")
-    if identity_url and extract_post_id(identity_url) != requested_post_id:
-        raise CaptureError("Captured page metadata identifies a different post")
+    if not identity_url or not _same_social_post(candidate.normalized_url, identity_url):
+        raise CaptureError("Captured page metadata did not identify the requested post")
     meaningful_metadata = any(
         parser.values.get(key)
         for key in (
@@ -485,38 +571,47 @@ def _capture_public_html(
             "Captured HTML has no post metadata; it may be a login or challenge page"
         )
 
+    captured_media: list[CapturedFile] = []
     media_artifacts: list[CapturedFile] = []
     linked_media_error: str | None = None
+    media_relationship: str | None = None
     media_url = parser.values.get("og:image") or parser.values.get("twitter:image")
     if media_url:
+        resolved_media_url = urljoin(final_url, media_url)
         try:
-            media_artifacts.append(
-                _capture_remote_image(
-                    media_url,
-                    destination / "post_media",
-                    client=client,
-                    validate_url=validate_url,
-                )
+            captured = _capture_remote_image(
+                resolved_media_url,
+                destination / "post_preview",
+                client=client,
+                validate_url=validate_url,
             )
+            captured_media.append(captured)
+            media_relationship = _post_media_relationship(
+                candidate.normalized_url, captured.source_url or resolved_media_url
+            )
+            if media_relationship is not None:
+                media_artifacts.append(captured)
         except CaptureError as exc:
             linked_media_error = str(exc)
     metadata = {
         "status": "captured",
         "method": "public-html",
         "page_url": candidate.normalized_url,
-        "final_url": final_url,
+        "final_url": redact_url_secrets(final_url),
         "post_id": requested_post_id,
         "post_identity_verified": True,
         "captured_at": _now_iso(),
-        "open_graph": parser.values,
-        "linked_media": [item.to_dict() for item in media_artifacts],
+        "open_graph": redact_secrets(parser.values),
+        "linked_media": [item.to_dict() for item in captured_media],
+        "face_match_eligible_media": [item.to_dict() for item in media_artifacts],
+        "media_relationship": media_relationship or "page-preview-only",
         "linked_media_error": linked_media_error,
     }
     metadata_artifact = _write_json_artifact(destination / "post_metadata.json", metadata)
     return PostCapture(
         status="captured",
         method="public-html",
-        artifacts=(html_artifact, metadata_artifact, *media_artifacts),
+        artifacts=(html_artifact, metadata_artifact, *captured_media),
         metadata=metadata,
         media_artifacts=tuple(media_artifacts),
     )
@@ -544,7 +639,7 @@ def _capture_remote_image(
         sha256=hashlib.sha256(raw).hexdigest(),
         byte_size=len(raw),
         media_type=media_type,
-        source_url=final_url,
+        source_url=redact_url_secrets(final_url),
     )
 
 

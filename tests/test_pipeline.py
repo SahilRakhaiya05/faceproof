@@ -19,7 +19,7 @@ from faceproof.face import (
     FaceQualityMetrics,
     ModelFingerprints,
 )
-from faceproof.pipeline import run_pipeline, run_tamper_demo, verify_run
+from faceproof.pipeline import PipelineError, run_pipeline, run_tamper_demo, verify_run
 from faceproof.search.base import SearchCandidate, SearchRun
 
 
@@ -73,6 +73,39 @@ def test_unanchored_local_verification_and_tamper_demo(tmp_path: Path) -> None:
     assert any("mismatch" in error for error in tampered["errors"])
 
 
+def test_anchored_run_requires_code_and_source_pins_before_processing(tmp_path: Path) -> None:
+    settings = replace(
+        _settings(tmp_path),
+        contract_address="0x0000000000000000000000000000000000001234",
+        private_key="test-only-key",
+    )
+    arguments = {
+        "image_path": tmp_path / "not-read.jpg",
+        "provider_name": "serpapi",
+        "settings": settings,
+        "consent_acknowledged": True,
+        "consent_reference": "test-consent",
+        "live": True,
+        "skip_anchor": False,
+        "approved_post_url": "https://x.com/example/status/123",
+    }
+
+    try:
+        run_pipeline(**arguments)
+    except PipelineError as exc:
+        assert "CONTRACT_CODE_HASH" in str(exc)
+    else:
+        raise AssertionError("anchored run accepted an unpinned registry")
+
+    arguments["settings"] = replace(settings, contract_code_hash="0x" + "11" * 32)
+    try:
+        run_pipeline(**arguments)
+    except PipelineError as exc:
+        assert "SOURCE_REVISION" in str(exc)
+    else:
+        raise AssertionError("anchored run accepted unpinned source")
+
+
 def test_canonical_sidecar_tampering_is_detected(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -83,6 +116,18 @@ def test_canonical_sidecar_tampering_is_detected(tmp_path: Path) -> None:
     assert result.evidence_ok
     assert not result.canonical_sidecar_ok
     assert not result.passed
+
+
+def test_unlisted_bundle_file_is_detected(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_sidecars(run_dir)
+    (run_dir / "injected.txt").write_text("not in the manifest", encoding="utf-8")
+
+    result = verify_run(run_dir, settings=_settings(tmp_path), require_chain=False)
+    assert not result.evidence_ok
+    assert not result.passed
+    assert any("unexpected unlisted" in error for error in result.evidence_detail["errors"])
 
 
 def test_verifier_uses_trusted_chain_config_not_bundle_claims(tmp_path: Path, monkeypatch) -> None:
@@ -105,6 +150,7 @@ def test_verifier_uses_trusted_chain_config_not_bundle_claims(tmp_path: Path, mo
         _settings(tmp_path),
         chain_id=31337,
         contract_address=trusted_address,
+        contract_code_hash="0x" + "11" * 32,
     )
     observed: dict[str, object] = {}
 
@@ -115,6 +161,7 @@ def test_verifier_uses_trusted_chain_config_not_bundle_claims(tmp_path: Path, mo
             chain_id_matches=True,
             anchored=True,
             commitment=value,
+            confirmations_satisfied=True,
             receipt_consistent=True,
         )
 
@@ -128,6 +175,25 @@ def test_verifier_uses_trusted_chain_config_not_bundle_claims(tmp_path: Path, mo
     assert result.passed
     assert observed["expected_chain_id"] == 31337
     assert observed["contract_address"] == trusted_address
+    assert observed["expected_code_hash"] == settings.contract_code_hash
+    assert observed["required_confirmations"] == settings.confirmations
+
+
+def test_verification_requires_trusted_contract_code_hash(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_sidecars(run_dir)
+    (run_dir / "chain-receipt.json").write_text("{}", encoding="utf-8")
+    settings = replace(
+        _settings(tmp_path),
+        contract_address="0x0000000000000000000000000000000000001234",
+    )
+
+    result = verify_run(run_dir, settings=settings)
+
+    assert not result.passed
+    assert result.chain is not None
+    assert "CONTRACT_CODE_HASH" in result.chain.detail
 
 
 def test_out_of_band_commitment_mismatch_fails(tmp_path: Path) -> None:
@@ -143,6 +209,41 @@ def test_out_of_band_commitment_mismatch_fails(tmp_path: Path) -> None:
     )
     assert result.external_anchor_ok is False
     assert not result.passed
+
+
+def test_commitment_sidecar_metadata_tampering_is_detected(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_sidecars(run_dir)
+    commitment_path = run_dir / "commitment.json"
+    commitment = json.loads(commitment_path.read_text(encoding="utf-8"))
+    commitment["abi_backend"] = "fabricated-backend"
+    commitment_path.write_text(json.dumps(commitment), encoding="utf-8")
+
+    result = verify_run(run_dir, settings=_settings(tmp_path), require_chain=False)
+
+    assert not result.evidence_ok
+    assert not result.passed
+    assert any("commitment sidecar" in error for error in result.evidence_detail["errors"])
+
+
+def test_duplicate_json_keys_are_rejected(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_sidecars(run_dir)
+    commitment_path = run_dir / "commitment.json"
+    original = commitment_path.read_text(encoding="utf-8").strip()
+    commitment_path.write_text(
+        '{"scheme":"first","scheme":"second","padding":' + original + "}",
+        encoding="utf-8",
+    )
+
+    try:
+        verify_run(run_dir, settings=_settings(tmp_path), require_chain=False)
+    except PipelineError as exc:
+        assert "Duplicate JSON key" in str(exc)
+    else:
+        raise AssertionError("duplicate JSON keys were accepted")
 
 
 def _encoding(embedding: tuple[float, ...]) -> FaceEncoding:
@@ -224,6 +325,11 @@ def test_pipeline_orchestrates_search_rematch_and_evidence(tmp_path: Path, monke
         )
 
     monkeypatch.setattr(pipeline_module, "OpenCVFaceBackend", FakeBackend)
+    monkeypatch.setattr(
+        pipeline_module,
+        "verify_default_models",
+        lambda _directory: {"yunet.onnx": "ok", "sface.onnx": "ok"},
+    )
     monkeypatch.setattr(pipeline_module, "_make_provider", lambda *_args, **_kwargs: FakeProvider())
     monkeypatch.setattr(pipeline_module, "capture_public_post", fake_capture)
 
@@ -242,3 +348,30 @@ def test_pipeline_orchestrates_search_rematch_and_evidence(tmp_path: Path, monke
     assert (result.run_dir / "manifest.json").is_file()
     verified = verify_run(result.run_dir, settings=_settings(tmp_path), require_chain=False)
     assert verified.passed
+
+
+def test_pipeline_fails_closed_when_pinned_models_do_not_verify(
+    tmp_path: Path, monkeypatch
+) -> None:
+    input_image = tmp_path / "query.jpg"
+    Image.new("RGB", (32, 32), color=(100, 110, 120)).save(input_image, "JPEG")
+    monkeypatch.setattr(
+        pipeline_module,
+        "verify_default_models",
+        lambda _directory: {"face_recognition_sface_2021dec.onnx": "SHA-256 mismatch"},
+    )
+
+    try:
+        run_pipeline(
+            image_path=input_image,
+            provider_name="serpapi",
+            settings=_settings(tmp_path),
+            consent_acknowledged=True,
+            live=True,
+            skip_anchor=True,
+        )
+    except PipelineError as exc:
+        assert "model integrity" in str(exc)
+        assert "SHA-256 mismatch" in str(exc)
+    else:
+        raise AssertionError("pipeline accepted an untrusted face model")

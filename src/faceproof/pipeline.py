@@ -45,6 +45,8 @@ from .face import (
     OpenCVFaceBackend,
     cosine_similarity,
 )
+from .model_assets import verify_default_models
+from .provenance import ProvenanceError, verify_git_source_revision
 from .search import (
     FaceCheckProvider,
     SearchCandidate,
@@ -54,6 +56,7 @@ from .search import (
     filter_social_candidates,
     normalize_page_url,
 )
+from .search.base import redact_url_secrets
 
 
 class PipelineError(RuntimeError):
@@ -181,8 +184,24 @@ def run_pipeline(
         settings.provider_key(provider_name)
         if not skip_anchor:
             settings.require_chain_write()
+            if not settings.contract_code_hash:
+                raise PipelineError(
+                    "FACEPROOF_CONTRACT_CODE_HASH is required for an anchored evidence claim"
+                )
+            verify_git_source_revision(settings.source_revision)
+    except ProvenanceError as exc:
+        raise PipelineError(str(exc)) from exc
     except ValueError as exc:
         raise PipelineError(str(exc)) from exc
+
+    model_results = verify_default_models(settings.model_dir)
+    invalid_models = [
+        f"{filename}: {status}" for filename, status in model_results.items() if status != "ok"
+    ]
+    if invalid_models:
+        raise PipelineError(
+            "Pinned face-model integrity check failed: " + "; ".join(invalid_models)
+        )
 
     source = Path(image_path)
     if not source.is_file():
@@ -374,6 +393,11 @@ def run_pipeline(
             post_media_similarity = max(similarities)
             linkage_level = "captured-post-media-rematched"
         else:
+            if not skip_anchor:
+                # A provider thumbnail associated with a confirmed permalink is
+                # useful discovery evidence, but it is not strong enough for a
+                # submission-mode on-chain claim about the post's own media.
+                continue
             linkage_level = "provider-result-associated-post-independently-confirmed"
 
         selected = candidate_match
@@ -466,6 +490,7 @@ def run_pipeline(
                 expected_chain_id=settings.chain_id,
                 contract_address=contract_address,
                 receipt=receipt_dict,
+                required_confirmations=settings.confirmations,
                 expected_code_hash=settings.contract_code_hash,
             )
         except ChainError as exc:
@@ -474,7 +499,6 @@ def run_pipeline(
                 {"stage": "blockchain", "error": str(exc)},
             )
             raise PipelineError(f"Blockchain anchoring/verification failed: {exc}") from exc
-        _write_json(run_dir / "chain-verification.json", chain_verification.to_dict())
         if not chain_verification.passed:
             raise PipelineError(
                 "Transaction was mined, but independent on-chain verification failed"
@@ -509,6 +533,18 @@ def verify_run(
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise PipelineError(f"Cannot read evidence sidecars: {exc}") from exc
 
+    expected_commitment_fields = {
+        "scheme",
+        "manifest_sha256",
+        "salt",
+        "commitment",
+        "abi_backend",
+        "keccak_backend",
+    }
+    if set(commitment) != expected_commitment_fields or not all(
+        isinstance(value, str) for value in commitment.values()
+    ):
+        raise PipelineError("Malformed commitment sidecar")
     if commitment.get("scheme") != COMMITMENT_SCHEME:
         raise PipelineError("Unsupported or missing commitment scheme")
     detail = verify_manifest(
@@ -518,6 +554,35 @@ def verify_run(
         expected_commitment=commitment.get("commitment"),
         expected_manifest_sha256=commitment.get("manifest_sha256"),
     )
+    try:
+        regenerated_commitment = compute_commitment(manifest, salt=commitment["salt"])
+    except ValueError as exc:
+        raise PipelineError(f"Cannot regenerate commitment sidecar: {exc}") from exc
+    if regenerated_commitment != commitment:
+        detail["errors"].append("commitment sidecar does not match regenerated values")
+        detail["ok"] = False
+        detail["valid"] = False
+    listed_paths = {
+        str(item.get("path"))
+        for item in manifest.get("artifacts", [])
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    allowed_sidecars = {
+        "chain-receipt.json",
+        "commitment.json",
+        "manifest.canonical.json",
+        "manifest.json",
+    }
+    actual_paths = {
+        path.relative_to(run_dir).as_posix() for path in run_dir.rglob("*") if path.is_file()
+    }
+    unexpected_paths = sorted(actual_paths - listed_paths - allowed_sidecars)
+    if unexpected_paths:
+        detail["errors"].extend(
+            f"unexpected unlisted bundle file: {path}" for path in unexpected_paths
+        )
+        detail["ok"] = False
+        detail["valid"] = False
     expected_canonical = canonical_manifest_bytes(manifest)
     try:
         sidecar_canonical = (run_dir / "manifest.canonical.json").read_bytes()
@@ -552,6 +617,15 @@ def verify_run(
                 receipt_consistent=False,
                 detail="A trusted FACEPROOF_CONTRACT_ADDRESS is required for verification",
             )
+        elif not settings.contract_code_hash:
+            chain = ChainVerification(
+                connected=False,
+                chain_id_matches=False,
+                anchored=False,
+                commitment=str(commitment.get("commitment", "")),
+                confirmations_required=settings.confirmations,
+                detail="A trusted FACEPROOF_CONTRACT_CODE_HASH is required for verification",
+            )
         else:
             try:
                 chain = verify_commitment_on_chain(
@@ -560,6 +634,7 @@ def verify_run(
                     expected_chain_id=settings.chain_id,
                     contract_address=settings.contract_address,
                     receipt=saved_receipt,
+                    required_confirmations=settings.confirmations,
                     timeout_seconds=settings.http_timeout_seconds,
                     expected_code_hash=settings.contract_code_hash,
                 )
@@ -751,8 +826,8 @@ def _manifest_metadata(
         },
         "selection": {
             "rank": candidate.rank,
-            "page_url": candidate.page_url,
-            "normalized_url": candidate.normalized_url,
+            "page_url": redact_url_secrets(candidate.page_url),
+            "normalized_url": redact_url_secrets(candidate.normalized_url),
             "post_id": candidate.post_id,
             "source": candidate.source,
             "title": candidate.title,
@@ -787,7 +862,6 @@ def _collect_pre_anchor_artifacts(
 ) -> tuple[dict[str, Path], dict[str, str]]:
     excluded = {
         "chain-receipt.json",
-        "chain-verification.json",
         "commitment.json",
         "manifest.canonical.json",
         "manifest.json",
@@ -885,7 +959,18 @@ def _write_bytes_atomic(path: Path, payload: bytes) -> None:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate JSON key: {key!r}")
+            result[key] = item
+        return result
+
+    value = json.loads(
+        path.read_text(encoding="utf-8"),
+        object_pairs_hook=reject_duplicate_keys,
+    )
     if not isinstance(value, dict):
         raise ValueError(f"Expected a JSON object: {path}")
     return value

@@ -20,25 +20,45 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
+          version: "0.11.8"
       - run: uv sync --locked --python 3.11 --extra dev
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: uv run pytest -q
+      - run: uv run bandit -q -r src/faceproof
+      - run: uv export --frozen --extra dev --no-emit-project --no-hashes --output-file audit-requirements.txt
+      - run: uv run pip-audit --strict --progress-spinner off -r audit-requirements.txt
+      - run: uv run pytest -q --cov=faceproof --cov-report=term --cov-fail-under=70
 
   solidity:
     name: Solidity contract
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: foundry-rs/foundry-toolchain@v1.9.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          version: stable
+          persist-credentials: false
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: v1.8.1
       - run: forge test -vv
         working-directory: contracts
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          version: "0.11.8"
+      - run: uv sync --locked --python 3.11 --extra dev
+      - name: Local EVM deploy-anchor-verify integration
+        run: uv run pytest -q tests/integration/test_chain_anvil.py
+        env:
+          FACEPROOF_RUN_ANVIL_INTEGRATION: "1"

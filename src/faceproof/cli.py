@@ -22,6 +22,7 @@ from .pipeline import (
     run_tamper_demo,
     verify_run,
 )
+from .provenance import ProvenanceError, verify_git_source_revision
 
 app = typer.Typer(
     name="faceproof",
@@ -149,6 +150,23 @@ def doctor(
         _status(bool(settings.contract_code_hash), optional=not demo),
         "configured" if settings.contract_code_hash else "FACEPROOF_CONTRACT_CODE_HASH not set",
     )
+    revision_ok = bool(settings.source_revision)
+    revision_detail = (
+        settings.source_revision if revision_ok else "FACEPROOF_SOURCE_REVISION not set"
+    )
+    if demo and revision_ok:
+        try:
+            verified_revision = verify_git_source_revision(settings.source_revision)
+        except ProvenanceError as exc:
+            revision_ok = False
+            revision_detail = str(exc)
+        else:
+            revision_detail = f"{verified_revision.revision}; working tree clean"
+    table.add_row(
+        "Source revision",
+        _status(revision_ok, optional=not demo),
+        revision_detail,
+    )
 
     rpc_ok = not check_rpc
     rpc_detail = "not checked"
@@ -167,7 +185,11 @@ def doctor(
                         settings.contract_address,
                         expected_code_hash=settings.contract_code_hash,
                     )
-                    rpc_detail += "; registry code verified"
+                    rpc_detail += (
+                        "; registry runtime hash verified"
+                        if settings.contract_code_hash
+                        else "; contract code present, runtime hash unpinned"
+                    )
                 if settings.private_key:
                     account = web3.eth.account.from_key(settings.private_key)
                     balance = int(web3.eth.get_balance(account.address))
@@ -191,6 +213,7 @@ def doctor(
             core_ok
             and chain_configured
             and bool(settings.contract_code_hash)
+            and revision_ok
             and rpc_ok
             and wallet_funded
         )
@@ -209,6 +232,11 @@ def scan(
     """Run local face detection/encoding without searching or uploading."""
     _require_consent(i_have_consent)
     settings = _settings()
+    model_results = verify_default_models(settings.model_dir)
+    invalid_models = [name for name, status in model_results.items() if status != "ok"]
+    if invalid_models:
+        console.print("[red]Face scan failed: pinned model integrity check failed.[/red]")
+        raise typer.Exit(code=2)
     backend = OpenCVFaceBackend(settings.yunet_model, settings.sface_model)
     try:
         encoding = backend.encode_one(image)
@@ -380,6 +408,13 @@ def verify(
         table.add_row("RPC connected", _pass_fail(result.chain.connected))
         table.add_row("Chain ID", _pass_fail(result.chain.chain_id_matches))
         table.add_row("Registry state", _pass_fail(result.chain.anchored))
+        if result.chain.confirmations_satisfied is not None:
+            table.add_row(
+                "Confirmations",
+                f"{_pass_fail(result.chain.confirmations_satisfied)} — "
+                f"{result.chain.confirmations_observed}/"
+                f"{result.chain.confirmations_required}",
+            )
         table.add_row(
             "Transaction receipt",
             (

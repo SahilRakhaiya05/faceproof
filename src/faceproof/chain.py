@@ -95,13 +95,23 @@ class ChainVerification:
     submitter: str | None = None
     chain_timestamp: int | None = None
     block_number: int | None = None
+    confirmations_observed: int | None = None
+    confirmations_required: int = 1
+    confirmations_satisfied: bool | None = None
     receipt_consistent: bool | None = None
     detail: str = ""
 
     @property
     def passed(self) -> bool:
         receipt_ok = self.receipt_consistent is not False
-        return self.connected and self.chain_id_matches and self.anchored and receipt_ok
+        confirmations_ok = self.confirmations_satisfied is True
+        return (
+            self.connected
+            and self.chain_id_matches
+            and self.anchored
+            and confirmations_ok
+            and receipt_ok
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {**asdict(self), "passed": self.passed}
@@ -312,11 +322,13 @@ def verify_commitment_on_chain(
     expected_chain_id: int,
     contract_address: str,
     receipt: dict[str, Any] | None = None,
+    required_confirmations: int = 1,
     timeout_seconds: float = 30,
     expected_code_hash: str | bytes | None = None,
 ) -> ChainVerification:
     commitment_bytes = parse_bytes32(commitment)
     _require_positive_int(expected_chain_id, "expected_chain_id")
+    _require_positive_int(required_confirmations, "required_confirmations")
     _require_positive_number(timeout_seconds, "timeout_seconds")
     commitment_hex = bytes32_hex(commitment_bytes)
     rpc_label = _redacted_rpc_url(rpc_url)
@@ -332,6 +344,7 @@ def verify_commitment_on_chain(
             chain_id_matches=False,
             anchored=False,
             commitment=commitment_hex,
+            confirmations_required=required_confirmations,
             detail=f"Could not connect to RPC {rpc_label}",
         )
     if actual_chain_id != expected_chain_id:
@@ -340,6 +353,7 @@ def verify_commitment_on_chain(
             chain_id_matches=False,
             anchored=False,
             commitment=commitment_hex,
+            confirmations_required=required_confirmations,
             detail=f"RPC chain {actual_chain_id} does not match expected {expected_chain_id}",
         )
 
@@ -354,6 +368,7 @@ def verify_commitment_on_chain(
             chain_id_matches=True,
             anchored=False,
             commitment=commitment_hex,
+            confirmations_required=required_confirmations,
             detail="Commitment is absent from the registry",
         )
 
@@ -364,6 +379,13 @@ def verify_commitment_on_chain(
         raise
     except Exception as exc:
         raise ChainError(f"Registry record read failed ({type(exc).__name__})") from exc
+    try:
+        confirmations_observed = max(0, int(web3.eth.block_number) - block_number + 1)
+    except Exception as exc:
+        raise ChainError(
+            f"Could not read current confirmation depth ({type(exc).__name__})"
+        ) from exc
+    confirmations_satisfied = confirmations_observed >= required_confirmations
     receipt_consistent = _verify_saved_receipt(
         web3=web3,
         contract=contract,
@@ -371,6 +393,7 @@ def verify_commitment_on_chain(
         expected_chain_id=expected_chain_id,
         saved=receipt,
         expected_record=(submitter, chain_timestamp, block_number),
+        required_confirmations=required_confirmations,
     )
     return ChainVerification(
         connected=True,
@@ -380,11 +403,19 @@ def verify_commitment_on_chain(
         submitter=submitter,
         chain_timestamp=chain_timestamp,
         block_number=block_number,
+        confirmations_observed=confirmations_observed,
+        confirmations_required=required_confirmations,
+        confirmations_satisfied=confirmations_satisfied,
         receipt_consistent=receipt_consistent,
         detail=(
-            "Commitment is present in registry state"
-            if receipt_consistent is not False
-            else "Commitment exists, but the saved receipt is inconsistent"
+            f"Commitment exists, but only {confirmations_observed} confirmation(s) are present; "
+            f"{required_confirmations} required"
+            if not confirmations_satisfied
+            else (
+                "Commitment is present in registry state"
+                if receipt_consistent is not False
+                else "Commitment exists, but the saved receipt is inconsistent"
+            )
         ),
     )
 
@@ -435,12 +466,13 @@ def _verify_saved_receipt(
     expected_chain_id: int,
     saved: dict[str, Any] | None,
     expected_record: tuple[str, int, int] | None = None,
+    required_confirmations: int = 1,
 ) -> bool | None:
     if saved is None:
         return None
     try:
         required = set(AnchorReceipt.__dataclass_fields__)
-        if not isinstance(saved, dict) or not required.issubset(saved):
+        if not isinstance(saved, dict) or set(saved) != required:
             return False
         if _saved_str(saved, "schema") != RECEIPT_SCHEMA:
             return False
@@ -492,7 +524,7 @@ def _verify_saved_receipt(
             return False
         observed_at_write = _saved_int(saved, "confirmations_observed", minimum=1)
         current_observed = max(0, int(web3.eth.block_number) - canonical.block_number + 1)
-        return observed_at_write <= current_observed
+        return observed_at_write <= current_observed and current_observed >= required_confirmations
     except Exception:
         return False
 

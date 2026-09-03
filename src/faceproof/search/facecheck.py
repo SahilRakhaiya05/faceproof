@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from .base import (
     SearchRun,
     extract_post_id,
     normalize_page_url,
+    redact_secrets,
 )
 
 
@@ -37,6 +39,7 @@ class FaceCheckProvider:
     ) -> None:
         if not api_token.strip():
             raise ValueError("FaceCheck API token is required")
+        self._api_token = api_token
         self._headers = {"accept": "application/json", "Authorization": api_token}
         self.testing_mode = testing_mode
         self.poll_interval_seconds = poll_interval_seconds
@@ -68,7 +71,7 @@ class FaceCheckProvider:
                     files={"images": (image_path.name, image_handle, "application/octet-stream")},
                 )
             upload_response.raise_for_status()
-            upload_raw = upload_response.text
+            upload_raw = bytes(upload_response.content)
             upload = upload_response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise SearchError(f"FaceCheck upload failed: {exc}") from exc
@@ -86,7 +89,7 @@ class FaceCheckProvider:
         }
         deadline = time.monotonic() + self.max_wait_seconds
         polls: list[dict[str, Any]] = []
-        poll_bodies: list[str] = []
+        poll_bodies: list[bytes] = []
         final: dict[str, Any] | None = None
         while time.monotonic() < deadline:
             try:
@@ -94,7 +97,7 @@ class FaceCheckProvider:
                     f"{self.base_url}/api/search", headers=self._headers, json=payload
                 )
                 response.raise_for_status()
-                poll_bodies.append(response.text)
+                poll_bodies.append(bytes(response.content))
                 body = response.json()
             except (httpx.HTTPError, ValueError) as exc:
                 raise SearchError(f"FaceCheck search failed: {exc}") from exc
@@ -147,19 +150,24 @@ class FaceCheckProvider:
             search_id=search_id,
             candidates=candidates,
             raw_response={
-                "upload": upload,
-                "polls": polls,
-                "raw_http_bodies": {"upload": upload_raw, "polls": poll_bodies},
+                "upload": redact_secrets(upload, secret_values=(self._api_token,)),
+                "polls": redact_secrets(polls, secret_values=(self._api_token,)),
+                "raw_http_body_sha256": {
+                    "upload": hashlib.sha256(upload_raw).hexdigest(),
+                    "polls": [hashlib.sha256(item).hexdigest() for item in poll_bodies],
+                },
             },
             live=True,
             provider_mode=("testing" if self.testing_mode or authoritative_demo else "production"),
         )
 
-    @staticmethod
-    def _raise_api_error(body: dict[str, Any], operation: str) -> None:
+    def _raise_api_error(self, body: dict[str, Any], operation: str) -> None:
         if body.get("error"):
-            code = body.get("code", "unknown")
-            raise SearchError(f"FaceCheck {operation} error: {body['error']} ({code})")
+            error = redact_secrets(str(body["error"]), secret_values=(self._api_token,))
+            code = redact_secrets(
+                str(body.get("code", "unknown")), secret_values=(self._api_token,)
+            )
+            raise SearchError(f"FaceCheck {operation} error: {error} ({code})")
 
 
 def _optional_float(value: Any) -> float | None:

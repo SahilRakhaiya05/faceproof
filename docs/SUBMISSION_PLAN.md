@@ -8,7 +8,7 @@ technical integrity, and judge confidence.
 | Requirement | Implementation | Evidence shown to judges |
 |---|---|---|
 | Face identification | OpenCV YuNet detection/quality gate and SFace embedding, with pinned model hashes | Detection preview, face geometry, quality metrics, model fingerprints, local re-match score |
-| Genuine web/social search | Live FaceCheck production API or SerpApi Google Lens with cache disabled; no runtime fixture fallback | Provider request/search ID, capture time, sanitized raw response, dynamically returned post candidates |
+| Genuine web/social search | Live FaceCheck production API or SerpApi Google Lens with cache disabled; no runtime fixture fallback | Provider request/search ID, capture time, sanitized parsed response, exact-body SHA-256, dynamically returned post candidates |
 | Matching social post | Platform-specific permalink IDs, provider-image re-match, public post identity capture, post-media re-match when exposed | Stable permalink, post ID, capture artifact, linkage level, selected/captured media hashes |
 | Blockchain upload | Salted commitment to the canonical evidence manifest, written to `EvidenceRegistry` | Base Sepolia contract, transaction, block, sender, emitted event and explorer page |
 | Re-verification | Local artifact re-hash plus trusted-chain, bytecode, transaction, receipt, event and registry-state checks | `faceproof verify` PASS from a fresh process; one-byte tamper demo FAIL |
@@ -23,15 +23,19 @@ technical integrity, and judge confidence.
    already-indexed posts. Use FaceCheck for cross-photo identity discovery and
    SerpApi Lens for exact/cropped repost discovery. Never use FaceCheck testing
    mode as submission evidence.
-3. **Threshold calibration** — create a small consented validation set with
-   positive and negative pairs under realistic compression/crop conditions.
-   Freeze the chosen threshold and publish aggregate results, not face images.
+3. **Threshold calibration** — retain the reproducible aggregate LFW baseline,
+   then create a small consented in-domain validation set with positive and
+   negative pairs under realistic compression/crop conditions. Freeze the
+   chosen threshold and publish aggregate results, not face images.
 4. **Public chain deployment** — deploy the immutable registry to Base
    Sepolia, verify the source on BaseScan, publish chain ID/address/runtime-code
    hash, and fund a dedicated testnet wallet. Keep a second RPC endpoint ready.
 5. **Two-pass review** — run unanchored discovery, inspect the post, then run a
    fresh live search with `--approve-post-url`. Prefer a result labelled
-   `captured-post-media-rematched`; disclose weaker provider-associated linkage.
+   `captured-post-media-rematched`; anchored runs reject weaker
+   provider-associated linkage. YouTube, Reddit, and Bluesky are the most
+   practical prepared-demo targets; X often confirms identity through oEmbed
+   without exposing eligible post media.
 6. **Independent verification** — copy the commitment and transaction hash to
    the submission notes/QR. Verify from a clean process using those out-of-band
    values, then run the tamper demo.

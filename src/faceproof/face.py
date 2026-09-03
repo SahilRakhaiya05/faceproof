@@ -687,7 +687,8 @@ class OpenCVFaceBackend:
         self._ensure_loaded()
         cv2 = self._cv2
         np = self._np
-        assert cv2 is not None and np is not None
+        if cv2 is None or np is None:
+            raise FaceModelError("OpenCV backend was not initialized")
 
         if isinstance(image, (str, os.PathLike)):  # noqa: UP038 - Python 3.9 tests
             path = Path(image)
@@ -726,7 +727,8 @@ class OpenCVFaceBackend:
         return np.ascontiguousarray(image)
 
     def _detect_prepared(self, image: Any) -> tuple[FaceDetection, ...]:
-        assert self._detector is not None
+        if self._detector is None:
+            raise FaceModelError("YuNet detector was not initialized")
         image_height, image_width = image.shape[:2]
         try:
             self._detector.setInputSize((int(image_width), int(image_height)))
@@ -749,7 +751,8 @@ class OpenCVFaceBackend:
         detection: FaceDetection,
     ) -> FaceQualityMetrics:
         cv2 = self._cv2
-        assert cv2 is not None
+        if cv2 is None:
+            raise FaceModelError("OpenCV backend was not initialized")
         image_height, image_width = image.shape[:2]
         left, top, right, bottom = detection.box.pixel_bounds(int(image_width), int(image_height))
         if right <= left or bottom <= top:
@@ -773,7 +776,8 @@ class OpenCVFaceBackend:
     ) -> FaceEncoding:
         np = self._np
         recognizer = self._recognizer
-        assert np is not None and recognizer is not None
+        if np is None or recognizer is None:
+            raise FaceModelError("SFace recognizer was not initialized")
         row = np.asarray(detection.as_yunet_row(), dtype=np.float32)
         try:
             aligned = recognizer.alignCrop(image, row)

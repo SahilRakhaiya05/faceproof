@@ -512,15 +512,6 @@ def _ethereum_keccak256(data: bytes) -> tuple[bytes, str]:
         return bytes(keccak(data)), "eth_hash"
 
     try:
-        from Crypto.Hash import keccak as crypto_keccak  # type: ignore[import-not-found]
-    except ImportError:
-        pass
-    else:
-        digest = crypto_keccak.new(digest_bits=256)
-        digest.update(data)
-        return digest.digest(), "pycryptodome"
-
-    try:
         from web3 import Web3  # type: ignore[import-not-found]
     except ImportError:
         pass
@@ -529,7 +520,7 @@ def _ethereum_keccak256(data: bytes) -> tuple[bytes, str]:
 
     raise KeccakUnavailable(
         "An Ethereum-compatible Keccak-256 implementation is required. Install "
-        "eth-hash[pycryptodome], pycryptodome, or web3. hashlib.sha3_256 is not "
+        "eth-hash or web3. hashlib.sha3_256 is not "
         "a safe substitute because Ethereum uses pre-standard Keccak-256."
     )
 
