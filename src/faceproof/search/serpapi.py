@@ -215,6 +215,7 @@ class SerpApiLensProvider:
             provider=self.name,
             search_id=search_id,
             candidates=candidates,
+            web_labels=_extract_web_labels(body),
             raw_response={
                 "query_upload": {
                     "filename": upload_name,
@@ -275,6 +276,27 @@ def _positive_int(value: Any, fallback: int) -> int:
     if type(value) is int and value > 0:
         return value
     return fallback
+
+
+def _extract_web_labels(body: dict[str, Any], *, limit: int = 8) -> list[str]:
+    """Extract deterministic Lens query labels without inferring identity locally."""
+    labels: list[str] = []
+    seen: set[str] = set()
+    related = body.get("related_content")
+    if not isinstance(related, list):
+        return labels
+    for item in related:
+        if not isinstance(item, dict) or not isinstance(item.get("query"), str):
+            continue
+        label = " ".join(item["query"].split())[:160]
+        key = label.casefold()
+        if not label or key in seen:
+            continue
+        seen.add(key)
+        labels.append(label)
+        if len(labels) >= limit:
+            break
+    return labels
 
 
 def _required_string(value: Any, field: str) -> str:

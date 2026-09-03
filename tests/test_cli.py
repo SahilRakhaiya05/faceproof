@@ -91,7 +91,12 @@ def test_successful_unanchored_run_renders_release_evidence(tmp_path: Path, monk
         provider="serpapi",
         search_id="lens-live-123",
         selected_url="https://x.com/volunteer/status/42",
+        selected_title="Volunteer demo post — नाम",
+        selected_source="X",
+        selected_media_path=run_dir / "candidates" / "01" / "candidate.jpg",
+        web_labels=("Volunteer A",),
         local_similarity=0.812345,
+        similarity_threshold=0.363,
         manifest_sha256="0x" + "11" * 32,
         commitment="0x" + "22" * 32,
         chain_receipt=None,
@@ -121,12 +126,24 @@ def test_successful_unanchored_run_renders_release_evidence(tmp_path: Path, monk
     assert result.exit_code == 0, result.output
     assert "lens-live-123" in result.output
     assert "https://x.com/volunteer/status/42" in result.output
+    assert "Volunteer A" in result.output
+    assert "UNVERIFIED" in result.output
+    assert "Volunteer demo post" in result.output
+    assert "candidate.jpg" in result.output
     assert "0.812345" in result.output
+    assert "0.363000" in result.output
     assert "SKIPPED" in result.output
     assert "development run only" in result.output
     assert observed["live"] is True
     assert observed["consent_acknowledged"] is True
     assert observed["skip_anchor"] is True
+
+
+def test_provider_display_text_is_safe_for_legacy_windows_encoding() -> None:
+    rendered = cli_module._display_text("Mukesh Ambani — नाम", encoding="cp1252")
+
+    assert str(rendered).startswith("Mukesh Ambani")
+    assert "नाम" not in str(rendered)
 
 
 def test_verify_pass_renders_verified_verdict(tmp_path: Path, monkeypatch) -> None:

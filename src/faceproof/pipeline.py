@@ -93,7 +93,12 @@ class PipelineResult:
     provider: str
     search_id: str
     selected_url: str
+    selected_title: str | None
+    selected_source: str | None
+    selected_media_path: Path
+    web_labels: tuple[str, ...]
     local_similarity: float
+    similarity_threshold: float
     manifest_sha256: str
     commitment: str
     chain_receipt: AnchorReceipt | None
@@ -407,6 +412,7 @@ def run_pipeline(
     selection_record = {
         "status": "selected",
         "candidate": selected.candidate.public_dict(),
+        "candidate_media": selected.media_artifact.to_dict(),
         "local_similarity_micros": selected.local_similarity_micros,
         "threshold_micros": round(threshold * 1_000_000),
         "capture_status": post_capture.status,
@@ -495,7 +501,12 @@ def run_pipeline(
         provider=search_run.provider,
         search_id=search_run.search_id,
         selected_url=selected.candidate.normalized_url,
+        selected_title=selected.candidate.title,
+        selected_source=selected.candidate.source,
+        selected_media_path=selected.media_path,
+        web_labels=search_run.web_labels,
         local_similarity=selected.local_similarity,
+        similarity_threshold=threshold,
         manifest_sha256=commitment_record["manifest_sha256"],
         commitment=commitment_record["commitment"],
         chain_receipt=chain_receipt,
@@ -755,6 +766,8 @@ def _write_search_record(path: Path, run: SearchRun) -> None:
             "retrieved_at": run.retrieved_at,
             "live": run.live,
             "provider_mode": run.provider_mode,
+            "web_labels": list(run.web_labels),
+            "web_label_interpretation": "unverified-provider-derived-search-hint",
             "candidates": [candidate.public_dict() for candidate in run.candidates],
             "raw_response": run.raw_response,
         },
@@ -796,6 +809,8 @@ def _manifest_metadata(
             "retrieved_at": search_run.retrieved_at,
             "live": search_run.live,
             "provider_mode": search_run.provider_mode,
+            "web_labels": list(search_run.web_labels),
+            "web_label_interpretation": "unverified-provider-derived-search-hint",
             "query_strategy": search_query_strategy,
             "candidate_count": len(search_run.candidates),
         },

@@ -126,6 +126,7 @@ class SearchRun:
     retrieved_at: str
     candidates: tuple[SearchCandidate, ...]
     raw_response: dict[str, Any] = field(repr=False)
+    web_labels: tuple[str, ...] = ()
     live: bool = True
     provider_mode: str = "production"
 
@@ -137,6 +138,7 @@ class SearchRun:
         search_id: str,
         candidates: list[SearchCandidate],
         raw_response: dict[str, Any],
+        web_labels: list[str] | tuple[str, ...] = (),
         live: bool,
         provider_mode: str,
     ) -> SearchRun:
@@ -146,6 +148,7 @@ class SearchRun:
             retrieved_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             candidates=tuple(candidates),
             raw_response=raw_response,
+            web_labels=tuple(web_labels),
             live=live,
             provider_mode=provider_mode,
         )

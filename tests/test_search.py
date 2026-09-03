@@ -134,6 +134,11 @@ def test_serpapi_upload_and_live_lens_search(tmp_path: Path) -> None:
                             "exact_matches": True,
                         }
                     ],
+                    "related_content": [
+                        {"query": "  Volunteer   Example  "},
+                        {"query": "volunteer example"},
+                        {"query": "Demo portrait"},
+                    ],
                 },
             )
         raise AssertionError(f"Unexpected URL: {request.url}")
@@ -146,6 +151,7 @@ def test_serpapi_upload_and_live_lens_search(tmp_path: Path) -> None:
     assert run.live is True
     assert run.candidates[0].exact_match is True
     assert run.candidates[0].post_id == "99"
+    assert run.web_labels == ("Volunteer Example", "Demo portrait")
     assert "api_key" not in run.raw_response["request_parameters"]
     assert run.raw_response["search"]["search_parameters"]["api_key"] == "[REDACTED]"
     assert "raw_http_bodies" not in run.raw_response

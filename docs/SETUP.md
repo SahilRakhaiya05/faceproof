@@ -72,6 +72,11 @@ Review the returned stable post permalink and its evidence directory. An
 `INCONCLUSIVE` result means the live index or public capture did not produce an
 eligible face match; it never falls back to a fixture or hardcoded URL.
 
+The result table also shows any label supplied by Google Lens, the post title
+and source, the downloaded matched-image path, and the local similarity versus
+the frozen threshold. A displayed name remains an unverified web search hint;
+it is not a face-model or legal-identity claim.
+
 ## 4. Configure Base Sepolia
 
 The recommended public record uses Base Sepolia, chain ID `84532`, and the

@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from . import __version__
 from .chain import ChainError, make_web3, registry_contract
@@ -345,8 +346,20 @@ def run_command(
     table.add_column("Stage")
     table.add_column("Result")
     table.add_row("Live search", f"PASS — {result.provider} / {result.search_id}")
-    table.add_row("Social post", result.selected_url)
-    table.add_row("Local face candidate", f"{result.local_similarity:.6f}; human review required")
+    if result.web_labels:
+        table.add_row(
+            "Web-derived label",
+            _display_text(f"{'; '.join(result.web_labels[:3])} — UNVERIFIED search hint"),
+        )
+    table.add_row("Result title", _display_text(result.selected_title or "not provided"))
+    table.add_row("Result source", _display_text(result.selected_source or "not provided"))
+    table.add_row("Social post", _display_text(result.selected_url))
+    table.add_row("Matched image", _display_text(str(result.selected_media_path.resolve())))
+    table.add_row(
+        "Local face candidate",
+        f"{result.local_similarity:.6f}; threshold {result.similarity_threshold:.6f}; "
+        "human review required",
+    )
     table.add_row("Manifest SHA-256", result.manifest_sha256)
     table.add_row("On-chain commitment", result.commitment)
     if result.chain_receipt:
@@ -359,6 +372,7 @@ def run_command(
         table.add_row("Blockchain", "[yellow]SKIPPED — development run only[/yellow]")
     table.add_row("Evidence directory", str(result.run_dir.resolve()))
     console.print(table)
+    console.print("Matched image file: ", _display_text(str(result.selected_media_path.resolve())))
     if result.explorer_url:
         console.print(f"Explorer: [link={result.explorer_url}]{result.explorer_url}[/link]")
 
@@ -468,6 +482,16 @@ def _status(ok: bool, *, optional: bool = False) -> str:
     if ok:
         return "[green]PASS[/green]"
     return "[yellow]MISSING[/yellow]" if optional else "[red]FAIL[/red]"
+
+
+def _display_text(value: str, *, encoding: str | None = None) -> Text:
+    """Render untrusted provider text safely on legacy Windows code pages."""
+    target_encoding = encoding or getattr(console.file, "encoding", None) or "utf-8"
+    try:
+        safe = value.encode(target_encoding, errors="replace").decode(target_encoding)
+    except LookupError:
+        safe = value.encode("ascii", errors="replace").decode("ascii")
+    return Text(safe)
 
 
 def _pass_fail(ok: bool) -> str:

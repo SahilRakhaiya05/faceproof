@@ -297,6 +297,7 @@ def test_pipeline_orchestrates_search_rematch_and_evidence(tmp_path: Path, monke
         search_id="request-123",
         candidates=[candidate],
         raw_response={"synthetic_test_only": True},
+        web_labels=["Synthetic volunteer"],
         live=True,
         provider_mode="test",
     )
@@ -342,6 +343,10 @@ def test_pipeline_orchestrates_search_rematch_and_evidence(tmp_path: Path, monke
 
     assert result.search_id == "request-123"
     assert result.selected_url.endswith("/123")
+    assert result.selected_title is None
+    assert result.web_labels == ("Synthetic volunteer",)
+    assert result.similarity_threshold == 0.5
+    assert result.selected_media_path.is_file()
     assert (result.run_dir / "manifest.json").is_file()
     verified = verify_run(result.run_dir, settings=_settings(tmp_path), require_chain=False)
     assert verified.passed

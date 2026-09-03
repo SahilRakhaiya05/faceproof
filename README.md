@@ -27,6 +27,9 @@ FaceProof makes four narrow, independently testable claims:
 It does **not** prove a person's legal identity, post authorship, truth,
 original publication time, consent, or completeness of web search. Search and
 face-similarity scores are investigative candidates and require human review.
+When Lens supplies a related label (for example, a public name), FaceProof
+records and displays it only as an **unverified web-derived search hint**. The
+Task 3 rubric requires a matching post, not automatic legal-name identification.
 
 ## Architecture
 
@@ -164,6 +167,8 @@ Each `evidence/<run-id>/` directory contains:
 - a sanitized parsed provider receipt plus the SHA-256 of the exact HTTP
   response bytes;
 - candidate image bytes returned or referenced by the provider;
+- Lens web labels, result title/source, and the exact matched-image path/hash,
+  with label provenance explicitly marked unverified;
 - independently validated public-post metadata and, where exposed, post media;
 - `manifest.json`, containing hashes and model/search/match metadata;
 - `manifest.canonical.json`, the RFC 8785 canonical bytes;
@@ -218,7 +223,8 @@ fall back to those responses from a live run.
    and `--approve-post-url`.
 3. Show detection, quality result, model fingerprints and embedding fingerprint.
 4. Show provider search ID, timestamp and dynamically returned candidates.
-5. Show the selected public social URL and independent local face score.
+5. Show the unverified web label, selected post title/source, exact matched
+   image, and independent local face score versus its frozen threshold.
 6. Show the evidence commitment and successful Base Sepolia transaction.
 7. Open the explorer transaction.
 8. Run `faceproof verify` from a new process with the independently copied
