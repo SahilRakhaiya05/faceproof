@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "faceproof"
+version = "0.1.0"
+description = "Consent-first face-to-web discovery with tamper-evident blockchain verification."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "HH Goa 2026 Task 3 Team" }]
+dependencies = [
+  "eth-abi>=5.2,<6",
+  "httpx>=0.28,<1",
+  "jsonschema>=4.25,<5",
+  "numpy>=2.0,<3",
+  "opencv-python-headless>=4.11,<5",
+  "pillow>=11,<13",
+  "python-dotenv>=1.1,<2",
+  "rfc8785>=0.1.4,<1",
+  "rich>=14,<15",
+  "typer>=0.16,<1",
+  "web3>=7.12,<8",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-cov>=6.2,<7",
+  "respx>=0.22,<1",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+faceproof = "faceproof.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/faceproof"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer's supported declaration style calls Option/Argument in defaults.
+"src/faceproof/cli.py" = ["B008"]

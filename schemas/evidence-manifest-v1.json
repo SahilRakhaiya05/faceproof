@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://faceproof.dev/schemas/evidence-manifest-v1.json",
+  "title": "FaceProof Evidence Manifest v1",
+  "description": "Pre-anchor evidence manifest. Blockchain commitments, salts, transaction receipts, attestation UIDs, and other anchor results are sidecars and must not be inserted here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "run_id",
+    "observed_at",
+    "canonicalization",
+    "hash_algorithm",
+    "artifacts",
+    "metadata"
+  ],
+  "properties": {
+    "schema": {
+      "const": "faceproof-evidence-manifest-v1"
+    },
+    "version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "canonicalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm"],
+      "properties": {
+        "algorithm": {
+          "enum": [
+            "RFC8785",
+            "faceproof-deterministic-json-v1"
+          ]
+        }
+      }
+    },
+    "hash_algorithm": {
+      "const": "SHA-256"
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/artifact"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "propertyNames": {
+        "not": {
+          "pattern": "^(?i:receipt|anchor[-_ ]receipt|blockchain[-_ ]receipt|transaction[-_ ]receipt|tx[-_ ]receipt)$"
+        }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/metadataValue"
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "metadataValue": {
+      "oneOf": [
+        {
+          "type": ["string", "number", "integer", "boolean", "null"]
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/metadataValue"
+          }
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "not": {
+              "pattern": "^(?i:receipt|anchor[-_ ]receipt|blockchain[-_ ]receipt|transaction[-_ ]receipt|tx[-_ ]receipt)$"
+            }
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/metadataValue"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,30 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Downloaded models and private/live evidence
+models/*.onnx
+evidence/*
+!evidence/.gitkeep
+samples/*
+!samples/README.md
+
+# Solidity build products and local state
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+contracts/.anvil/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
