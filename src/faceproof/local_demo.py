@@ -17,8 +17,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
-from eth_account import Account
-from web3 import Web3
+from web3 import Account, Web3
 from web3.types import TxReceipt
 
 from .config import Settings
