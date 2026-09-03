@@ -44,9 +44,9 @@ technical integrity, and judge confidence.
 
 ## Five-minute demo
 
-1. State the narrow claim: proof that a live provider returned a face-matched
-   public post and that the captured evidence has not changed—not legal identity
-   or truth.
+1. State the narrow claim: proof that the client recorded a live-provider
+   response containing a face-matched public post and that the captured evidence
+   has not changed—not legal identity or truth.
 2. Show consent scope, the input image, current time, Git commit and green CI.
 3. Run the fresh approved live pipeline; point out the provider search ID and
    absence of hardcoded candidates.

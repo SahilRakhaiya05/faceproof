@@ -16,10 +16,11 @@ files and public chain state.
 
 ## What the pipeline proves
 
-FaceProof makes four narrow, independently testable claims:
+FaceProof makes four narrow, auditable claims:
 
 1. A specific model detected and encoded a face from supplied bytes.
-2. A named live provider returned a candidate public URL at a recorded time.
+2. The client recorded an HTTPS response attributed to the configured live
+   provider, containing a candidate public URL at a recorded time.
 3. The client preserved a sanitized provider record, its exact-body digest,
    and particular media and metadata bytes.
 4. A wallet committed to that exact evidence no later than an on-chain block.
