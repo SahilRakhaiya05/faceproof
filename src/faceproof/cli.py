@@ -521,7 +521,7 @@ def local_demo_console(
         help="Open the localhost judge console in the default browser.",
     ),
 ) -> None:
-    """Launch the web console with a zero-gas, disposable localhost blockchain."""
+    """Launch the web console with a zero-cost, disposable localhost blockchain."""
     from .local_demo import LocalDemoError, serve_local_demo
 
     console.print(

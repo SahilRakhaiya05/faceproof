@@ -200,7 +200,7 @@ def serve_local_demo(
         _notify(
             on_status,
             "EPHEMERAL LOCAL CHAIN: records disappear when this command stops; "
-            "this is a zero-gas rehearsal, not public-chain proof.",
+            "no real funds are required; this is not public-chain proof.",
         )
         if open_browser:
             browser_timer = threading.Timer(0.8, webbrowser.open, args=(runtime.web_url,))
