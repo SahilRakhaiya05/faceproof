@@ -10,9 +10,10 @@ commitment on an EVM blockchain, and re-verifies the result from the original
 files and public chain state.
 
 > **Status:** the offline pipeline, security gates, contract, and a real local
-> EVM deploy/anchor/re-verify/tamper path are tested. A valid provider key,
-> consented discoverable post, funded testnet wallet, and public deployment are
-> still required for a submission-grade live run.
+> EVM deploy/anchor/re-verify/tamper path are tested. To complete the final live
+> demo record, use a consented, already-indexed public post and preserve its
+> end-to-end receipt. Base Sepolia is optional but provides a stronger durable,
+> publicly queryable proof than the rubric-valid local chain.
 
 ## What the pipeline proves
 
@@ -230,7 +231,8 @@ Recommended public deployment:
 - Chain ID: `84532`
 - Public RPC: `https://sepolia.base.org`
 - Explorer: `https://sepolia.basescan.org`
-- Contract address: **add after deployment**
+- Contract address: set after an optional public deployment; `local-demo`
+  creates and pins a new per-session address automatically
 
 After deployment, set `FACEPROOF_CONTRACT_ADDRESS`. Also set
 `FACEPROOF_CONTRACT_CODE_HASH` to the Keccak-256 hash of the deployed runtime
@@ -320,8 +322,9 @@ fall back to those responses from a live run.
 4. Show provider search ID, timestamp and dynamically returned candidates.
 5. Show the unverified web label, selected post title/source, exact matched
    image, and independent local face score versus its frozen threshold.
-6. Show the evidence commitment and successful Base Sepolia transaction.
-7. Open the explorer transaction.
+6. Show the evidence commitment and successful EVM transaction/read-back.
+7. For Base Sepolia, open the explorer transaction; for Anvil, show the local
+   receipt and registry verification in the console.
 8. Run `faceproof verify` from a new process with the independently copied
    commitment and transaction hash; show a passing result.
 9. Run `faceproof tamper-demo` and show the changed copy fail.

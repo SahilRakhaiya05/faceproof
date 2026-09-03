@@ -10,7 +10,7 @@ technical integrity, and judge confidence.
 | Face identification | OpenCV YuNet detection/quality gate and SFace embedding, with pinned model hashes | Detection preview, face geometry, quality metrics, model fingerprints, local re-match score |
 | Genuine web/social search | Live SerpApi Google Lens direct-image query with cache disabled; no runtime fixture fallback | Provider request/search ID, capture time, sanitized parsed response, exact-body SHA-256, dynamically returned post candidates |
 | Matching social post | Platform-specific permalink IDs, provider-image re-match, public post identity capture, post-media re-match when exposed | Stable permalink, post ID, capture artifact, linkage level, selected/captured media hashes |
-| Blockchain upload | Salted commitment to the canonical evidence manifest, written to `EvidenceRegistry` | Base Sepolia contract, transaction, block, sender, emitted event and explorer page |
+| Blockchain upload | Salted commitment to the canonical evidence manifest, written to `EvidenceRegistry` on local Anvil or Base Sepolia | Contract, transaction, block, sender, emitted event and verified registry read-back; explorer page when public |
 | Re-verification | Local artifact re-hash plus trusted-chain, bytecode, transaction, receipt, event and registry-state checks | `faceproof verify` PASS from a fresh process; one-byte tamper demo FAIL |
 | GitHub repository | Reproducible Python/Solidity source, lockfile, CI, tests and documentation | Public repository, green CI, tagged release and exact demo commit |
 
@@ -26,9 +26,11 @@ technical integrity, and judge confidence.
    then create a small consented in-domain validation set with positive and
    negative pairs under realistic compression/crop conditions. Freeze the
    chosen threshold and publish aggregate results, not face images.
-4. **Public chain deployment** — deploy the immutable registry to Base
-   Sepolia, verify the source on BaseScan, publish chain ID/address/runtime-code
-   hash, and fund a dedicated testnet wallet. Keep a second RPC endpoint ready.
+4. **Public-chain upgrade (strongly recommended)** — the local Anvil route
+   satisfies the stated blockchain requirement. For stronger durable proof,
+   deploy the immutable registry to Base Sepolia, verify the source on BaseScan,
+   publish chain ID/address/runtime-code hash, and fund a dedicated testnet
+   wallet. Keep a second RPC endpoint ready.
 5. **Two-pass review** — run unanchored discovery, inspect the post, then run a
    fresh live search with `--approve-post-url`. Prefer a result labelled
    `captured-post-media-rematched`; anchored runs reject weaker
@@ -52,7 +54,8 @@ technical integrity, and judge confidence.
    absence of hardcoded candidates.
 4. Open the returned permalink and show the independent local face score and
    linkage level.
-5. Open the BaseScan transaction/event and compare its commitment with the CLI.
+5. Show the transaction/event and registry read-back; open BaseScan when using
+   the recommended public deployment.
 6. In a new process, verify with the independently copied commitment/tx hash.
 7. Change one byte through `tamper-demo` and show the expected failure.
 8. Close with limitations and the consent/privacy controls.
@@ -61,7 +64,8 @@ technical integrity, and judge confidence.
 
 - a SerpApi key with free-plan quota remaining;
 - a consented test image and a discoverable public post;
-- a funded Base Sepolia wallet and deployed registry address;
+- optionally, for durable public proof, a funded Base Sepolia wallet and
+  deployed registry address;
 - approval to create/publish the repository under the owner's GitHub account.
 
 These are intentionally not hardcoded or fabricated by the project.
