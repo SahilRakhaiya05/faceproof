@@ -42,6 +42,61 @@ def _micros(value: object) -> float | None:
     return None if number is None else round(number / 1_000_000, 6)
 
 
+def _error_summary(error: dict[str, Any]) -> dict[str, Any] | None:
+    if not error:
+        return None
+    issues_value = error.get("issues")
+    issues = (
+        [item[:80] for item in issues_value[:16] if isinstance(item, str)]
+        if isinstance(issues_value, list)
+        else []
+    )
+    quality_value = error.get("quality")
+    quality = {
+        field: _float(quality_value.get(field))
+        for field in (
+            "confidence",
+            "face_width_px",
+            "face_height_px",
+            "face_area_ratio",
+            "visible_fraction",
+            "sharpness",
+            "brightness",
+        )
+        if isinstance(quality_value, dict) and _float(quality_value.get(field)) is not None
+    }
+    requirements_value = error.get("requirements")
+    requirements = {
+        field: _float(requirements_value.get(field))
+        for field in (
+            "min_confidence",
+            "min_face_size_px",
+            "min_face_area_ratio",
+            "min_visible_fraction",
+            "min_sharpness",
+            "min_brightness",
+            "max_brightness",
+        )
+        if isinstance(requirements_value, dict)
+        and _float(requirements_value.get(field)) is not None
+    }
+    action = error.get("action")
+    error_code = error.get("error_code")
+    search_credit_consumed = error.get("search_credit_consumed")
+    return {
+        "stage": error.get("stage"),
+        "message": error.get("error"),
+        "code": error_code[:80] if isinstance(error_code, str) else None,
+        "issues": issues,
+        "metrics": quality or None,
+        "requirements": requirements or None,
+        "action": action[:500] if isinstance(action, str) else None,
+        "search_credit_consumed": (
+            search_credit_consumed if type(search_credit_consumed) is bool else None
+        ),
+    }
+
+
 def _asset(run_id: str, relative_path: str | None) -> str | None:
     if not relative_path:
         return None
@@ -58,9 +113,18 @@ def _candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         "source": candidate.get("source"),
         "platform": platform_name(url),
         "post_id": candidate.get("post_id"),
+        "provider_item_id": candidate.get("provider_item_id"),
         "exact_match": candidate.get("exact_match") is True,
         "result_type": candidate.get("result_type") or "visual_match",
     }
+
+
+def _candidate_identity(candidate: dict[str, Any]) -> tuple[str, str | None]:
+    """Identify one provider media item, not only its shared post permalink."""
+
+    url = str(candidate.get("url") or candidate.get("normalized_url") or "")
+    provider_item_id = candidate.get("provider_item_id")
+    return url, provider_item_id if isinstance(provider_item_id, str) else None
 
 
 def _assessment_summary(path: Path, *, run_id: str, root_name: str) -> dict[str, Any] | None:
@@ -145,8 +209,8 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         )
         if item is not None
     ]
-    disposition_by_url = {
-        str(item["url"]): str(item["status"])
+    disposition_by_identity = {
+        _candidate_identity(item): str(item["status"])
         for item in [*post_assessments, *profile_assessments]
         if item.get("url")
     }
@@ -154,7 +218,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     selected_candidate = (
         selection.get("candidate") if isinstance(selection.get("candidate"), dict) else {}
     )
-    selected_url = str(selected_candidate.get("normalized_url") or "")
+    selected_identity = _candidate_identity(selected_candidate)
     provider_candidates = provider.get("candidates")
     result_board: list[dict[str, Any]] = []
     if isinstance(provider_candidates, list):
@@ -162,11 +226,12 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
             if not isinstance(candidate, dict):
                 continue
             item = _candidate_summary(candidate)
+            identity = _candidate_identity(item)
             url = str(item["url"])
-            if url == selected_url:
+            if identity == selected_identity:
                 disposition = "selected"
-            elif url in disposition_by_url:
-                disposition = disposition_by_url[url]
+            elif identity in disposition_by_identity:
+                disposition = disposition_by_identity[identity]
             elif is_social_post_url(url):
                 disposition = "post-not-evaluated"
             elif is_social_profile_url(url):
@@ -197,7 +262,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
             (
                 str(item["ordinal"])
                 for item in post_assessments
-                if item.get("url") == selected.get("url")
+                if _candidate_identity(item) == _candidate_identity(selected)
             ),
             None,
         )
@@ -213,6 +278,10 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     artifacts = manifest.get("artifacts")
     search_ids = provider.get("search_ids")
     search_types = provider.get("search_types")
+    raw_provider = provider.get("raw_response")
+    provider_actor = raw_provider.get("actor") if isinstance(raw_provider, dict) else None
+    if not isinstance(provider_actor, str) or not 1 <= len(provider_actor) <= 2048:
+        provider_actor = None
     chain = None
     if receipt:
         chain = {
@@ -236,12 +305,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     return {
         "run_id": run_id,
         "status": status,
-        "error": {
-            "stage": error.get("stage"),
-            "message": error.get("error"),
-        }
-        if error
-        else None,
+        "error": _error_summary(error),
         "face": {
             "confidence": _float(detection.get("confidence")),
             "box": detection.get("box"),
@@ -257,6 +321,10 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         },
         "search": {
             "provider": provider.get("provider"),
+            "provider_strategy": (
+                "bluesky" if provider.get("provider") == "bluesky-public-api" else "lens"
+            ),
+            "actor": provider_actor,
             "search_id": provider.get("search_id"),
             "search_ids": search_ids if isinstance(search_ids, list) else [],
             "search_types": search_types if isinstance(search_types, list) else [],

@@ -68,6 +68,12 @@ deviation 0.45 percentage points.
 The FaceProof 0.2.0 release rerun reproduced every aggregate metric and input
 fingerprint above. It took 243.96 seconds including pinned-input acquisition
 and 172.03 seconds for the benchmark itself; face encoding took 143.48 seconds.
+These measurements belong to the recorded FaceProof 0.2.0 source hash and
+pinned model files. FaceProof 0.4.0 retains the same models, alignment,
+similarity calculation, quality thresholds, and decision threshold, but adds a
+pre-decode image size/pixel safety gate in `face.py`; therefore its current
+source hash is intentionally different. A fresh benchmark is required before
+claiming exact-source reproduction for 0.4.0.
 Runtime varies by disk, CPU, and network. The environment was Python 3.11.15
 and OpenCV 4.14.0. Bootstrap results use 1,000 deterministic replicates with
 seed `20260903`.

@@ -92,6 +92,69 @@ def test_summary_is_presentation_safe_and_separates_profile_leads(tmp_path: Path
     assert len(list_run_summaries(tmp_path / "evidence")) == 1
 
 
+def test_summary_distinguishes_multiple_cid_images_on_one_bluesky_post(tmp_path: Path) -> None:
+    run = tmp_path / "evidence" / "multi-image-run"
+    url = "https://bsky.app/profile/did:plc:volunteer/post/3abc"
+    first = {
+        "provider": "bluesky-public-api",
+        "rank": 1,
+        "normalized_url": url,
+        "provider_item_id": "at://did:plc:volunteer/app.bsky.feed.post/3abc|postcid|image-one",
+        "post_id": "did:plc:volunteer/3abc",
+    }
+    second = {
+        **first,
+        "rank": 2,
+        "provider_item_id": "at://did:plc:volunteer/app.bsky.feed.post/3abc|postcid|image-two",
+    }
+    _write(
+        run / "search" / "provider-response.json",
+        {
+            "provider": "bluesky-public-api",
+            "live": True,
+            "candidates": [first, second],
+        },
+    )
+    _write(
+        run / "candidates" / "01" / "assessment.json",
+        {
+            "candidate": first,
+            "status": "below-threshold",
+            "local_similarity_micros": 200_000,
+            "threshold_micros": 363_000,
+        },
+    )
+    _write(
+        run / "candidates" / "02" / "assessment.json",
+        {
+            "candidate": second,
+            "status": "matched",
+            "local_similarity_micros": 900_000,
+            "threshold_micros": 363_000,
+        },
+    )
+    _write(
+        run / "selection.json",
+        {
+            "candidate": second,
+            "candidate_media": {"relative_path": "candidate_media.jpg"},
+            "local_similarity_micros": 900_000,
+            "threshold_micros": 363_000,
+        },
+    )
+    _write(run / "manifest.json", {"artifacts": []})
+    _write(run / "commitment.json", {"commitment": "0x" + "22" * 32})
+
+    summary = summarize_run(run)
+
+    assert [item["disposition"] for item in summary["result_board"]] == [
+        "below-threshold",
+        "selected",
+    ]
+    assert summary["selected"]["provider_item_id"].endswith("image-two")
+    assert summary["selected"]["media_url"].endswith("/candidates/02/candidate_media.jpg")
+
+
 def test_summary_uses_anchor_receipt_field_names(tmp_path: Path) -> None:
     run = tmp_path / "run-2"
     _write(run / "manifest.json", {"artifacts": []})
@@ -132,6 +195,40 @@ def test_summary_rejects_duplicate_json_keys(tmp_path: Path) -> None:
 
     assert summary["status"] == "interrupted"
     assert summary["integrity"]["artifact_count"] == 0
+
+
+def test_summary_exposes_bounded_face_quality_guidance(tmp_path: Path) -> None:
+    run = tmp_path / "face-quality-run"
+    _write(
+        run / "run-error.json",
+        {
+            "stage": "face",
+            "error": "face quality check failed: face_too_small",
+            "error_code": "face-quality",
+            "issues": ["face_too_small"],
+            "quality": {
+                "confidence": "0.91900000",
+                "face_width_px": "32.94400000",
+                "face_height_px": "42.81800000",
+                "face_area_ratio": "0.02807400",
+            },
+            "requirements": {"min_face_size_px": 64},
+            "action": "Use the original-resolution image or a closer crop.",
+            "search_credit_consumed": False,
+        },
+    )
+    (run / "input").mkdir()
+    (run / "input" / "query.jpg").write_bytes(b"query")
+
+    summary = summarize_run(run)
+
+    assert summary["status"] == "failed"
+    assert summary["error"]["code"] == "face-quality"
+    assert summary["error"]["issues"] == ["face_too_small"]
+    assert summary["error"]["metrics"]["face_width_px"] == 32.944
+    assert summary["error"]["requirements"]["min_face_size_px"] == 64.0
+    assert "original-resolution" in summary["error"]["action"]
+    assert summary["error"]["search_credit_consumed"] is False
 
 
 def test_summary_surfaces_out_of_bundle_pending_anchor_journal(tmp_path: Path) -> None:

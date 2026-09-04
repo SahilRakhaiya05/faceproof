@@ -154,8 +154,13 @@ def doctor(
         serpapi_detail = "SERPAPI_API_KEY not set"
     table.add_row(
         "SerpApi Google Lens",
-        _status(serpapi_ok),
+        _status(serpapi_ok, optional=True),
         serpapi_detail,
+    )
+    table.add_row(
+        "Bluesky public feed",
+        _status(True),
+        "no API key; runtime consented handle or DID required",
     )
 
     chain_configured = bool(settings.contract_address and settings.private_key)
@@ -230,7 +235,7 @@ def doctor(
     table.add_row("RPC", _status(rpc_ok, optional=True), rpc_detail)
     console.print(table)
 
-    core_ok = py_ok and models_ok and serpapi_ok
+    core_ok = py_ok and models_ok
     if demo:
         core_ok = (
             core_ok
@@ -316,7 +321,17 @@ def run_command(
     search_mode: str = typer.Option(
         "standard",
         "--search-mode",
-        help="standard uses one visual query; deep uses exact + visual queries (two credits).",
+        help="Lens standard uses one all query; deep uses full-image exact + face-crop visual.",
+    ),
+    search_provider: str = typer.Option(
+        "lens",
+        "--search-provider",
+        help="lens searches the web; bluesky scans a consented public author feed without a key.",
+    ),
+    bluesky_actor: str | None = typer.Option(
+        None,
+        "--bluesky-actor",
+        help="Runtime handle or DID required when --search-provider bluesky is selected.",
     ),
     platforms: str = typer.Option(
         "all",
@@ -351,6 +366,9 @@ def run_command(
     effective_image = image
     review_manifest_sha256: str | None = None
     review_commitment: str | None = None
+    review_input_sha256: str | None = None
+    review_input_bytes: bytes | None = None
+    reviewed_content_identity = None
     profile_candidate_limit = 6 if check_linkedin_profiles else 0
     profile_authorized = check_linkedin_profiles
     profile_platforms: frozenset[str] | None = frozenset({"linkedin"})
@@ -379,6 +397,9 @@ def run_command(
             raise typer.Exit(code=2)
         effective_image = reviewed.image_path
         search_mode = reviewed.search_mode
+        search_provider = reviewed.search_provider
+        bluesky_actor = reviewed.bluesky_actor
+        threshold = reviewed.threshold
         selected_platforms = reviewed.platforms
         max_candidates = reviewed.max_candidates
         profile_candidate_limit = reviewed.max_profile_candidates
@@ -386,8 +407,12 @@ def run_command(
         profile_platforms = reviewed.profile_platforms
         review_manifest_sha256 = reviewed.manifest_sha256
         review_commitment = reviewed.commitment
+        review_input_sha256 = reviewed.input_sha256
+        review_input_bytes = reviewed.input_bytes
+        reviewed_content_identity = reviewed.content_identity
         console.print(
-            "[cyan]>[/cyan] Reusing the verified discovery image, permalink, and search policy."
+            "[cyan]>[/cyan] Reusing the verified discovery image, permalink, threshold, and "
+            "search policy."
         )
     console.print(
         Panel.fit(
@@ -409,11 +434,16 @@ def run_command(
             profile_discovery_authorized=profile_authorized,
             profile_platforms=profile_platforms,
             search_mode=search_mode,
+            search_provider=search_provider,
+            bluesky_actor=bluesky_actor,
             platforms=selected_platforms,
             approved_post_url=approve_post_url,
             review_run_id=review_run_id,
             review_manifest_sha256=review_manifest_sha256,
             review_commitment=review_commitment,
+            review_input_sha256=review_input_sha256,
+            review_input_bytes=review_input_bytes,
+            reviewed_content_identity=reviewed_content_identity,
             output_dir=output_dir,
             on_stage=lambda message: console.print(f"[cyan]>[/cyan] {message}"),
         )
@@ -532,7 +562,7 @@ def local_demo_console(
         )
     )
     console.print("No private key or chain setting will be written to .env.")
-    console.print("Live web discovery still uses your configured SerpApi free-plan quota.")
+    console.print("Choose Lens for web-wide discovery or the no-key Bluesky author-feed connector.")
     try:
         serve_local_demo(
             _settings(),

@@ -75,23 +75,39 @@ function setReadyRow(name, ready, detail) {
   $(`[data-ready-icon="${name}"]`).classList.toggle("ok", ready);
 }
 
+function selectedProvider() {
+  return $('input[name="search-provider"]:checked')?.value || "bluesky";
+}
+
+function renderSourceReadiness() {
+  if (!readinessState) return;
+  const bluesky = selectedProvider() === "bluesky";
+  const source = bluesky ? readinessState.bluesky : readinessState.search;
+  $("#search-name").textContent = bluesky ? "Bluesky public feed" : "Google Lens via SerpApi";
+  setReadyRow("search", source.ready, source.detail);
+  if (bluesky) {
+    $("#quota-value").textContent = "No API key";
+    $("#quota-bar").style.width = "100%";
+  } else if (Number.isFinite(source.remaining) && Number.isFinite(source.monthly)) {
+    $("#quota-value").textContent = `${source.remaining} / ${source.monthly}`;
+    $("#quota-bar").style.width = `${Math.max(0, Math.min(100, source.remaining / source.monthly * 100))}%`;
+  } else {
+    $("#quota-value").textContent = "Unavailable";
+    $("#quota-bar").style.width = "0%";
+  }
+  const coreReady = readinessState.models.ready && source.ready;
+  const overall = $("#overall-status");
+  overall.textContent = readinessState.blockchain.ready && coreReady ? "Demo ready" : coreReady ? "Discovery ready" : "Setup needed";
+  overall.className = `status-orb ${coreReady ? (readinessState.blockchain.ready ? "ready" : "partial") : "partial"}`;
+}
+
 async function loadReadiness() {
   try {
     const data = await api("/api/readiness");
     readinessState = data;
     setReadyRow("models", data.models.ready, data.models.ready ? "Pinned model hashes verified" : "Download verified model assets");
-    setReadyRow("search", data.search.ready, data.search.detail);
     setReadyRow("chain", data.blockchain.ready, data.blockchain.detail);
-    const coreReady = data.models.ready && data.search.ready;
-    const overall = $("#overall-status");
-    overall.textContent = data.blockchain.ready && coreReady ? "Demo ready" : coreReady ? "Discovery ready" : "Setup needed";
-    overall.className = `status-orb ${coreReady ? (data.blockchain.ready ? "ready" : "partial") : "partial"}`;
-    if (Number.isFinite(data.search.remaining) && Number.isFinite(data.search.monthly)) {
-      $("#quota-value").textContent = `${data.search.remaining} / ${data.search.monthly}`;
-      $("#quota-bar").style.width = `${Math.max(0, Math.min(100, data.search.remaining / data.search.monthly * 100))}%`;
-    } else {
-      $("#quota-value").textContent = "Unavailable";
-    }
+    renderSourceReadiness();
     $("#metric-accuracy").textContent = `${(data.accuracy.scored_pair_accuracy * 100).toFixed(2)}%`;
     $("#metric-coverage").textContent = `${(data.accuracy.pair_coverage * 100).toFixed(2)}%`;
     $("#metric-scope").textContent = data.accuracy.scope;
@@ -119,10 +135,26 @@ function setSelectedFile(file) {
     $("#image-input").value = "";
     $("#preview-image").removeAttribute("src");
   }
+  const preflight = $("#preflight-result");
+  preflight.textContent = "";
+  preflight.className = "inline-message hidden";
 }
 
 function selectedMode() {
   return $("input[name='mode']:checked").value;
+}
+
+function updateSearchProvider() {
+  const bluesky = selectedProvider() === "bluesky";
+  $("#bluesky-options").classList.toggle("hidden", !bluesky);
+  $("#lens-options").classList.toggle("hidden", bluesky);
+  $("#provider-upload-row").classList.toggle("hidden", bluesky);
+  if (bluesky) {
+    $("#consent-upload").checked = false;
+    $("#profile-discovery").checked = false;
+    $('input[name="search-mode"][value="standard"]').checked = true;
+  }
+  renderSourceReadiness();
 }
 
 function updateMode() {
@@ -141,13 +173,60 @@ function formError(message) {
   element.classList.toggle("hidden", !message);
 }
 
+async function runPreflight() {
+  const result = $("#preflight-result");
+  const button = $("#preflight-button");
+  if (!selectedFile) {
+    result.textContent = "Choose one face image first.";
+    result.className = "inline-message warn";
+    return;
+  }
+  if (!$("#consent-adult").checked || !$("#consent-authorized").checked) {
+    result.textContent = "Confirm adult status and authorization for local face processing first.";
+    result.className = "inline-message warn";
+    return;
+  }
+  const payload = new FormData();
+  payload.set("image", selectedFile, selectedFile.name);
+  payload.set("consent_adult", "true");
+  payload.set("consent_authorized", "true");
+  button.disabled = true;
+  result.textContent = "Checking the face locally… no web request will be made.";
+  result.className = "inline-message";
+  try {
+    const checked = await api("/api/preflight", {
+      method: "POST",
+      headers: {"X-FaceProof-CSRF": csrf},
+      body: payload,
+    });
+    if (checked.passed) {
+      const quality = checked.quality || {};
+      result.textContent = `PASS · one face · confidence ${number(quality.confidence, 4)} · ${number(quality.face_width_px, 0)} × ${number(quality.face_height_px, 0)} px · sharpness ${number(quality.sharpness, 2)} · ${checked.embedding_dimensions}D encoding created ephemerally. No search credit used.`;
+      result.className = "inline-message ok";
+    } else {
+      result.textContent = `NEEDS A BETTER IMAGE · ${checked.action || "The local face gate did not pass."} No search credit used.`;
+      result.className = "inline-message warn";
+    }
+  } catch (error) {
+    result.textContent = error.message;
+    result.className = "inline-message warn";
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function validateForm() {
   if (selectedMode() === "discovery" && !selectedFile) return "Choose one consented face image.";
   if (selectedFile && selectedFile.size > 25 * 1024 * 1024) return "The image exceeds 25 MB.";
-  const consents = ["#consent-adult", "#consent-authorized", "#consent-search", "#consent-upload"];
-  if (consents.some((selector) => !$(selector).checked)) return "Complete all four consent attestations before processing.";
-  const platforms = $$("#platforms input:checked").map((input) => input.value);
-  if (!platforms.length) return "Select at least one platform to evaluate.";
+  const consents = ["#consent-adult", "#consent-authorized", "#consent-search"];
+  if (selectedProvider() === "lens") consents.push("#consent-upload");
+  if (consents.some((selector) => !$(selector).checked)) return "Complete every consent attestation shown before processing.";
+  if (selectedProvider() === "bluesky") {
+    if (!$("#bluesky-actor").value.trim()) return "Enter the consented public Bluesky handle or DID.";
+  } else {
+    const platforms = $$("#platforms input:checked").map((input) => input.value);
+    if (!platforms.length) return "Select at least one platform to evaluate.";
+  }
   if (selectedMode() === "anchor") {
     if (!readinessState?.blockchain?.ready) return "Complete the blockchain setup before anchoring.";
     if (!reviewedRunId) return "Select Prepare anchor from a completed discovery result first.";
@@ -199,8 +278,10 @@ async function submitRun(event) {
   payload.set("consent_reference", $("#consent-reference").value.trim());
   payload.set("approved_post_url", $("#approved-url").value.trim());
   payload.set("review_run_id", reviewedRunId || "");
-  payload.set("search_mode", $("input[name='search-mode']:checked").value);
-  payload.set("platforms", $$("#platforms input:checked").map((input) => input.value).join(","));
+  payload.set("search_provider", selectedProvider());
+  payload.set("bluesky_actor", $("#bluesky-actor").value.trim());
+  payload.set("search_mode", selectedProvider() === "bluesky" ? "standard" : $("input[name='search-mode']:checked").value);
+  payload.set("platforms", selectedProvider() === "bluesky" ? "bluesky" : $$("#platforms input:checked").map((input) => input.value).join(","));
   payload.set("max_candidates", $("#max-candidates").value);
   try {
     const job = await api("/api/runs", {
@@ -295,7 +376,32 @@ function statusCopy(summary, jobState) {
   if (summary?.status === "anchor-pending") return ["anchor-pending", "Anchor submitted—safe recovery required", "A signed transaction hash was journaled before broadcast. Recover that exact hash; never submit a replacement transaction blindly."];
   if (summary?.status === "discovered") return ["discovered", "Matching public post discovered", "The live result passed independent local comparison and the evidence bundle is sealed, but this development run was not put on-chain."];
   if (jobState === "inconclusive" || summary?.status === "inconclusive") return ["inconclusive", "No verified social-post match", "The search was genuine, but no returned public post passed every local and capture gate. This is an honest inconclusive result—not an identity finding."];
+  if (summary?.error?.code === "face-quality") return ["failed", "Use a clearer face image", summary.error.action || "Use an original-resolution image with one clear, unobstructed face."];
   return ["failed", "Pipeline stopped safely", "A required gate failed before a verified result could be claimed. No fallback result or blockchain write was substituted."];
+}
+
+function renderErrorGuidance(summary) {
+  const error = summary.error;
+  if (!error || error.code !== "face-quality") return "";
+  const metrics = error.metrics || {};
+  const requirements = error.requirements || {};
+  const measuredSize = metrics.face_width_px != null && metrics.face_height_px != null
+    ? `${number(metrics.face_width_px, 1)} × ${number(metrics.face_height_px, 1)} px`
+    : "—";
+  const minimumSize = requirements.min_face_size_px != null
+    ? `${number(requirements.min_face_size_px, 0)} × ${number(requirements.min_face_size_px, 0)} px`
+    : "—";
+  return `
+    <section class="result-section">
+      <div class="result-section-head"><h4>Face-quality preflight</h4><small>${error.search_credit_consumed === false ? "No search credit used" : "Stopped before search"}</small></div>
+      <div class="fact-grid">
+        <div class="fact"><span>Measured face</span><strong>${escapeHtml(measuredSize)}</strong></div>
+        <div class="fact"><span>Required minimum</span><strong>${escapeHtml(minimumSize)}</strong></div>
+        <div class="fact"><span>Detection confidence</span><strong>${escapeHtml(number(metrics.confidence, 4))}</strong></div>
+        <div class="fact"><span>Issue</span><strong>${escapeHtml((error.issues || []).join(", ") || "quality gate")}</strong></div>
+      </div>
+      <div class="label-warning">HOW TO FIX: ${escapeHtml(error.action || "Use an original-resolution image with one clear face.")}</div>
+    </section>`;
 }
 
 function renderFacts(summary) {
@@ -412,11 +518,14 @@ function renderSummary(summary, jobState = null, jobError = null) {
     return;
   }
   const [tone, title, description] = statusCopy(summary, jobState);
+  const outcomeMessage = summary.error?.code === "face-quality"
+    ? description
+    : summary.error?.message || description;
   result.innerHTML = `
     <div class="outcome-hero ${tone === "inconclusive" ? "warn" : tone === "failed" ? "fail" : ""}">
-      <div class="outcome-top"><div><span class="section-kicker">RUN ${escapeHtml(summary.run_id)}</span><h3>${escapeHtml(title)}</h3><p>${escapeHtml(summary.error?.message || description)}</p></div><span class="outcome-badge ${escapeHtml(tone)}">${escapeHtml(tone)}</span></div>
+      <div class="outcome-top"><div><span class="section-kicker">RUN ${escapeHtml(summary.run_id)}</span><h3>${escapeHtml(title)}</h3><p>${escapeHtml(outcomeMessage)}</p></div><span class="outcome-badge ${escapeHtml(tone)}">${escapeHtml(tone)}</span></div>
     </div>
-    ${renderFacts(summary)}${renderSelected(summary)}${renderProfiles(summary)}${renderCandidateTable(summary)}${renderIntegrity(summary)}
+    ${renderErrorGuidance(summary)}${summary.error?.code === "face-quality" ? "" : renderFacts(summary)}${renderSelected(summary)}${renderProfiles(summary)}${renderCandidateTable(summary)}${renderIntegrity(summary)}
   `;
   attachResultActions(summary);
   result.scrollIntoView({behavior: "smooth", block: "nearest"});
@@ -439,7 +548,12 @@ function attachResultActions(summary) {
     button.disabled = true;
     try {
       const result = await api(`/api/evidence/${encodeURIComponent(summary.run_id)}/verify`, {method: "POST", headers: {"X-FaceProof-CSRF": csrf}});
-      showProofMessage(result.passed ? "PASS: every artifact, canonical byte, commitment, and configured chain record verified." : `FAIL: ${result.errors.join(" · ")}`, result.passed);
+      let message;
+      if (!result.passed) message = `FAIL: ${result.errors.join(" · ")}`;
+      else if (result.chain?.passed) message = "PASS: every artifact, canonical byte, commitment, and configured chain record verified.";
+      else if (result.anchor_pending) message = "LOCAL PASS ONLY: evidence bytes are intact, but the blockchain transaction outcome is pending recovery. No on-chain PASS is claimed.";
+      else message = "LOCAL PASS ONLY: evidence bytes are intact. This discovery has no blockchain receipt, so no on-chain PASS is claimed.";
+      showProofMessage(message, result.passed);
     } catch (error) { showProofMessage(error.message, false); }
     finally { button.disabled = false; }
   });
@@ -480,7 +594,11 @@ function attachResultActions(summary) {
   $("#prepare-anchor")?.addEventListener("click", () => {
     reviewedRunId = summary.run_id;
     $("input[name='mode'][value='anchor']").checked = true;
+    const strategy = summary.search?.provider_strategy || (summary.search?.provider === "bluesky-public-api" ? "bluesky" : "lens");
+    $(`input[name="search-provider"][value="${strategy}"]`).checked = true;
+    $("#bluesky-actor").value = summary.search?.actor || "";
     $("#approved-url").value = summary.selected.url;
+    updateSearchProvider();
     updateMode();
     $("#run-form").scrollIntoView({behavior: "smooth", block: "start"});
     toast("Approved permalink copied. Add the consent reference, review it, then run the fresh anchor pass.");
@@ -532,11 +650,14 @@ $("#remove-file").addEventListener("click", (event) => { event.preventDefault();
 ["dragleave", "drop"].forEach((name) => dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.classList.remove("dragging"); }));
 dropZone.addEventListener("drop", (event) => { if (event.dataTransfer.files.length) setSelectedFile(event.dataTransfer.files[0]); });
 $$('input[name="mode"]').forEach((input) => input.addEventListener("change", updateMode));
+$$('input[name="search-provider"]').forEach((input) => input.addEventListener("change", updateSearchProvider));
 $("#max-candidates").addEventListener("input", (event) => { $("#candidate-count").textContent = event.target.value; });
+$("#preflight-button").addEventListener("click", runPreflight);
 $("#run-form").addEventListener("submit", submitRun);
 $("#refresh-history").addEventListener("click", loadHistory);
 
 updateMode();
+updateSearchProvider();
 loadReadiness();
 loadHistory();
 resumeActiveJob();

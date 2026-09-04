@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 import base64
+import gzip
+import socket
+import struct
+import threading
+import time
 from pathlib import Path
+from typing import Any
 
+import httpcore
 import httpx
+import pytest
 from PIL import Image
 
-from faceproof.capture import CaptureError, capture_public_post, materialize_candidate_image
+from faceproof.capture import (
+    CaptureError,
+    _PinnedPublicHTTPTransport,
+    _PinnedPublicNetworkBackend,
+    capture_public_post,
+    fetch_public_bytes,
+    inspect_image,
+    materialize_candidate_image,
+    validate_public_url,
+)
 from faceproof.search.base import SearchCandidate
 
 
@@ -63,6 +80,120 @@ def test_materialize_rejects_non_image_base64(tmp_path: Path) -> None:
         assert "valid image" in str(exc)
     else:
         raise AssertionError("invalid candidate bytes were accepted")
+
+
+def test_image_decompression_bomb_is_a_candidate_rejection() -> None:
+    # Minimal BMP header declaring 100,000 x 100,000 pixels. Pillow rejects it
+    # before decoding; FaceProof must turn that library exception into its
+    # normal per-candidate CaptureError instead of aborting the whole run.
+    raw = (
+        b"BM"
+        + struct.pack("<IHHI", 54, 0, 0, 54)
+        + struct.pack(
+            "<IiiHHIIiiII",
+            40,
+            100_000,
+            100_000,
+            1,
+            24,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    )
+
+    with pytest.raises(CaptureError, match="not a valid image"):
+        inspect_image(raw)
+
+
+def test_fetch_rejects_compressed_body_without_expanding_it() -> None:
+    compressed = gzip.compress(b"x" * 200_000)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(
+            200,
+            stream=httpx.ByteStream(compressed),
+            headers={
+                "content-type": "image/png",
+                "content-encoding": "gzip",
+                "content-length": str(len(compressed)),
+            },
+        )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(CaptureError, match="Encoded response bodies"),
+    ):
+        fetch_public_bytes(
+            "https://media.example/image.png",
+            client=client,
+            max_bytes=1024,
+            accepted_media_prefixes=("image/",),
+            validate_url=lambda _url: None,
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com:99999/image.png",
+        "https://[::1/image.png",
+        "https://bad\ud800.example/image.png",
+        "https://example.com/line\nbreak.png",
+        "https://example.com/has space.png",
+    ],
+)
+def test_malformed_evidence_urls_are_normal_capture_errors(url: str) -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: (_ for _ in ()).throw(AssertionError("request must not run"))
+        )
+    )
+    with client, pytest.raises(CaptureError):
+        fetch_public_bytes(
+            url,
+            client=client,
+            max_bytes=1024,
+            accepted_media_prefixes=("image/",),
+        )
+
+
+def test_malformed_redirect_location_is_a_normal_capture_error() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "https://[::1"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(CaptureError),
+    ):
+        fetch_public_bytes(
+            "https://media.example/image.png",
+            client=client,
+            max_bytes=1024,
+            accepted_media_prefixes=("image/",),
+            validate_url=lambda _url: None,
+        )
+
+
+@pytest.mark.parametrize("resolved_ip", ["224.0.0.251", "ff02::1"])
+def test_public_url_validator_rejects_multicast_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    resolved_ip: str,
+) -> None:
+    family = socket.AF_INET6 if ":" in resolved_ip else socket.AF_INET
+    monkeypatch.setattr(
+        "faceproof.capture.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (resolved_ip, 443))
+        ],
+    )
+
+    with pytest.raises(CaptureError, match="Non-public target"):
+        validate_public_url("https://multicast.example/image.png")
 
 
 def test_x_capture_requires_oembed_identity(tmp_path: Path) -> None:
@@ -308,3 +439,183 @@ def test_public_html_rejects_https_downgrade_for_same_post(tmp_path: Path) -> No
 
     assert capture.status == "unavailable"
     assert capture.metadata["post_identity_verified"] is False
+
+
+def test_pinned_transport_connects_to_vetted_ip_but_preserves_host_and_sni() -> None:
+    class ScriptedStream(httpcore.NetworkStream):
+        def __init__(self) -> None:
+            self.response = bytearray(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            self.writes: list[bytes] = []
+            self.server_hostname: str | None = None
+            self.closed = False
+
+        def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+            del timeout
+            chunk = bytes(self.response[:max_bytes])
+            del self.response[:max_bytes]
+            return chunk
+
+        def write(self, buffer: bytes, timeout: float | None = None) -> None:
+            del timeout
+            self.writes.append(buffer)
+
+        def close(self) -> None:
+            self.closed = True
+
+        def start_tls(
+            self,
+            ssl_context: Any,
+            server_hostname: str | None = None,
+            timeout: float | None = None,
+        ) -> httpcore.NetworkStream:
+            del ssl_context, timeout
+            self.server_hostname = server_hostname
+            return self
+
+        def get_extra_info(self, info: str) -> Any:
+            if info == "server_addr":
+                return ("8.8.8.8", 443)
+            return None
+
+    class RecordingBackend(httpcore.NetworkBackend):
+        def __init__(self, stream: ScriptedStream) -> None:
+            self.stream = stream
+            self.hosts: list[str] = []
+
+        def connect_tcp(
+            self,
+            host: str,
+            port: int,
+            timeout: float | None = None,
+            local_address: str | None = None,
+            socket_options: Any = None,
+        ) -> httpcore.NetworkStream:
+            del port, timeout, local_address, socket_options
+            self.hosts.append(host)
+            return self.stream
+
+    stream = ScriptedStream()
+    raw_backend = RecordingBackend(stream)
+
+    def resolver(*_args: Any, **_kwargs: Any) -> list[tuple[Any, ...]]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("8.8.8.8", 443))]
+
+    backend = _PinnedPublicNetworkBackend(backend=raw_backend, resolver=resolver)
+    transport = _PinnedPublicHTTPTransport(network_backend=backend)
+
+    with httpx.Client(transport=transport, trust_env=False) as client:
+        response = client.get("https://media.example/post")
+
+    assert response.status_code == 200
+    assert raw_backend.hosts == ["8.8.8.8"]
+    assert stream.server_hostname == "media.example"
+    assert b"Host: media.example" in b"".join(stream.writes)
+
+
+def test_pinned_backend_rejects_private_or_mismatched_actual_destination() -> None:
+    class PeerStream(httpcore.NetworkStream):
+        def __init__(self, peer: str) -> None:
+            self.peer = peer
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+        def get_extra_info(self, info: str) -> Any:
+            return (self.peer, 443) if info == "server_addr" else None
+
+    class PeerBackend(httpcore.NetworkBackend):
+        def __init__(self, stream: PeerStream) -> None:
+            self.stream = stream
+            self.calls = 0
+
+        def connect_tcp(self, *_args: Any, **_kwargs: Any) -> httpcore.NetworkStream:
+            self.calls += 1
+            return self.stream
+
+    def private_resolution(*_args: Any, **_kwargs: Any) -> list[tuple[Any, ...]]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 443))]
+
+    never_connected = PeerBackend(PeerStream("127.0.0.1"))
+    backend = _PinnedPublicNetworkBackend(
+        backend=never_connected,
+        resolver=private_resolution,
+    )
+    with pytest.raises(httpcore.ConnectError, match="Non-public target"):
+        backend.connect_tcp("rebind.example", 443)
+    assert never_connected.calls == 0
+
+    def public_resolution(*_args: Any, **_kwargs: Any) -> list[tuple[Any, ...]]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("8.8.8.8", 443))]
+
+    rebound_stream = PeerStream("127.0.0.1")
+    rebound_backend = PeerBackend(rebound_stream)
+    backend = _PinnedPublicNetworkBackend(
+        backend=rebound_backend,
+        resolver=public_resolution,
+    )
+    with pytest.raises(httpcore.ConnectError, match="validated public destination"):
+        backend.connect_tcp("rebind.example", 443)
+    assert rebound_backend.calls == 1
+    assert rebound_stream.closed is True
+
+
+def test_pinned_backend_bounds_blocking_dns_resolution() -> None:
+    release = threading.Event()
+
+    def blocking_resolver(*_args: Any, **_kwargs: Any) -> list[tuple[Any, ...]]:
+        release.wait(2)
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("8.8.8.8", 443),
+            )
+        ]
+
+    backend = _PinnedPublicNetworkBackend(resolver=blocking_resolver)
+    started = time.monotonic()
+    try:
+        with pytest.raises(httpcore.ConnectTimeout, match="Resolution timed out"):
+            backend.connect_tcp("slow-resolver.example", 443, timeout=0.02)
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 0.5
+
+
+def test_public_fetch_enforces_cumulative_deadline_on_raw_trickle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TrickleStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"first"
+            yield b"second"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=TrickleStream(),
+            headers={"content-type": "image/jpeg"},
+        )
+
+    clock = iter([0.0, 0.1, 0.7])
+    monkeypatch.setattr("faceproof.capture.time.monotonic", lambda: next(clock))
+    with (
+        httpx.Client(
+            transport=httpx.MockTransport(handler),
+            timeout=httpx.Timeout(0.5),
+        ) as client,
+        pytest.raises(CaptureError, match="total read deadline"),
+    ):
+        fetch_public_bytes(
+            "https://images.example/slow.jpg",
+            client=client,
+            max_bytes=100,
+            accepted_media_prefixes=("image/",),
+            validate_url=lambda _url: None,
+        )

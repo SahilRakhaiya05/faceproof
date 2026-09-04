@@ -5,7 +5,11 @@ import binascii
 import hashlib
 import ipaddress
 import json
+import math
+import queue
 import socket
+import threading
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import asdict, dataclass
@@ -15,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
+import httpcore
 import httpx
 from PIL import Image
 
@@ -24,6 +29,15 @@ from .search.base import (
     is_social_post_url,
     redact_secrets,
     redact_url_secrets,
+)
+from .search.bluesky import (
+    BLUESKY_CDN_HOSTS,
+    BLUESKY_GET_POST_THREAD_ENDPOINT,
+    BLUESKY_GET_POSTS_ENDPOINT,
+    BlueskyEvidenceRef,
+    extract_bluesky_post_images,
+    parse_bluesky_cdn_url,
+    parse_bluesky_permalink,
 )
 
 
@@ -98,6 +112,191 @@ _PLATFORM_SUFFIXES = {
     "youtube": ("youtube.com", "youtu.be"),
 }
 
+_MAX_RESOLVED_ADDRESSES = 4
+
+
+def _is_allowed_public_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Allow ordinary globally routed unicast addresses only."""
+
+    return bool(
+        address.is_global
+        and not address.is_multicast
+        and not address.is_unspecified
+        and not address.is_reserved
+        and not address.is_loopback
+        and not address.is_link_local
+        and not address.is_private
+    )
+
+
+class _PinnedPublicNetworkBackend(httpcore.NetworkBackend):
+    """Resolve once, reject non-public IPs, and connect to the vetted literal IP.
+
+    ``httpcore`` keeps the original request origin after ``connect_tcp`` returns,
+    so its TLS upgrade still sends the original hostname as SNI and validates the
+    certificate for that hostname. Only the TCP destination is replaced with a
+    previously vetted literal address, closing the DNS validation/connect race.
+    """
+
+    def __init__(
+        self,
+        *,
+        backend: httpcore.NetworkBackend | None = None,
+        resolver: Callable[..., list[tuple[Any, ...]]] | None = None,
+    ) -> None:
+        self._backend = backend or httpcore.SyncBackend()
+        self._resolver = resolver or socket.getaddrinfo
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.NetworkStream:
+        total_budget = float(timeout) if timeout is not None else 30.0
+        if total_budget <= 0 or not math.isfinite(total_budget):
+            raise httpcore.ConnectTimeout("Public destination resolution timed out")
+        deadline = time.monotonic() + total_budget
+        addresses = self._resolve_public_addresses(
+            host,
+            port,
+            timeout=total_budget,
+        )
+        last_error: httpcore.ConnectError | httpcore.ConnectTimeout | None = None
+        for address in addresses:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise httpcore.ConnectTimeout(
+                    "Timed out before a validated public destination was reachable"
+                )
+            try:
+                stream = self._backend.connect_tcp(
+                    address,
+                    port,
+                    timeout=remaining,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                last_error = exc
+                continue
+            try:
+                peer = stream.get_extra_info("server_addr")
+                peer_ip = (
+                    ipaddress.ip_address(peer[0]) if isinstance(peer, tuple) and peer else None
+                )
+            except (TypeError, ValueError):
+                peer_ip = None
+            expected_ip = ipaddress.ip_address(address)
+            if peer_ip is None or not _is_allowed_public_ip(peer_ip) or peer_ip != expected_ip:
+                stream.close()
+                raise httpcore.ConnectError(
+                    "Connected peer did not match the validated public destination"
+                )
+            return stream
+        if last_error is not None:
+            raise last_error
+        raise httpcore.ConnectError("No validated public destination was reachable")
+
+    def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.NetworkStream:
+        del path, timeout, socket_options
+        raise httpcore.ConnectError("Unix-socket transport is disabled for evidence capture")
+
+    def _resolve_public_addresses(
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout: float,
+    ) -> tuple[str, ...]:
+        result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+
+        def resolve() -> None:
+            try:
+                result = self._resolver(host, port, type=socket.SOCK_STREAM)
+            except Exception as exc:  # resolver implementations expose platform-specific errors
+                result_queue.put((False, exc))
+            else:
+                result_queue.put((True, result))
+
+        resolver_thread = threading.Thread(
+            target=resolve,
+            daemon=True,
+            name="faceproof-dns-resolver",
+        )
+        resolver_thread.start()
+        resolver_thread.join(timeout)
+        if resolver_thread.is_alive():
+            raise httpcore.ConnectTimeout(f"Resolution timed out for evidence host {host!r}")
+        try:
+            succeeded, value = result_queue.get_nowait()
+        except queue.Empty as exc:
+            raise httpcore.ConnectError("Resolver returned no result") from exc
+        if not succeeded:
+            raise httpcore.ConnectError(f"Could not resolve public evidence host {host!r}") from (
+                value if isinstance(value, Exception) else None
+            )
+        if not isinstance(value, (list, tuple)):
+            raise httpcore.ConnectError("Resolver returned an invalid destination list")
+        answers = value
+        addresses: list[str] = []
+        seen: set[str] = set()
+        for answer in answers:
+            try:
+                raw_address = answer[4][0]
+                address = ipaddress.ip_address(raw_address)
+            except (IndexError, TypeError, ValueError) as exc:
+                raise httpcore.ConnectError("Resolver returned an invalid destination") from exc
+            if not _is_allowed_public_ip(address):
+                raise httpcore.ConnectError(f"Non-public target address is not allowed: {address}")
+            normalized = str(address)
+            if normalized not in seen:
+                seen.add(normalized)
+                addresses.append(normalized)
+                if len(addresses) >= _MAX_RESOLVED_ADDRESSES:
+                    break
+        if not addresses:
+            raise httpcore.ConnectError(f"Could not resolve public evidence host {host!r}")
+        return tuple(addresses)
+
+
+class _PinnedPublicHTTPTransport(httpx.HTTPTransport):
+    """HTTPX transport backed by a DNS-pinned, public-address-only connector."""
+
+    def __init__(self, *, network_backend: httpcore.NetworkBackend | None = None) -> None:
+        # HTTPTransport's request/response and exception mapping are retained;
+        # only its connection pool is constructed with the hardened backend.
+        self._pool = httpcore.ConnectionPool(
+            ssl_context=httpx.create_ssl_context(verify=True, trust_env=False),
+            network_backend=network_backend or _PinnedPublicNetworkBackend(),
+            http1=True,
+            http2=False,
+            retries=0,
+        )
+
+
+def _public_http_client(*, timeout_seconds: float) -> httpx.Client:
+    return httpx.Client(
+        timeout=timeout_seconds,
+        headers={"User-Agent": "FaceProof/0.4 evidence-capture"},
+        transport=_PinnedPublicHTTPTransport(),
+        trust_env=False,
+    )
+
+
+def _client_read_timeout(client: httpx.Client) -> float:
+    value = client.timeout.read
+    if isinstance(value, (int, float)) and value > 0 and math.isfinite(value):
+        return float(value)
+    return 30.0
+
 
 def _host_matches(host: str, suffix: str) -> bool:
     return host == suffix or host.endswith(f".{suffix}")
@@ -155,7 +354,11 @@ def _post_media_relationship(post_url: str, media_url: str) -> str | None:
         return "reddit-content-cdn"
     if family == "youtube" and host in {"i.ytimg.com", "img.youtube.com"}:
         return "youtube-video-thumbnail"
-    if family == "bsky" and host == "cdn.bsky.app" and parts.path.startswith("/img/feed_"):
+    if (
+        family == "bsky"
+        and host in BLUESKY_CDN_HOSTS
+        and parts.path.startswith("/img/feed_fullsize/plain/")
+    ):
         return "bluesky-feed-media"
     return None
 
@@ -194,9 +397,11 @@ def materialize_candidate_image(
 
     if raw is None:
         owns_client = client is None
-        http = client or httpx.Client(
-            timeout=timeout_seconds,
-            headers={"User-Agent": "FaceProof/0.1 evidence-capture"},
+        http = client or _public_http_client(timeout_seconds=timeout_seconds)
+        effective_validator = (
+            validate_url
+            if validate_url is not None or not owns_client
+            else _validate_public_url_syntax
         )
         try:
             for url in (candidate.image_url, candidate.thumbnail_url):
@@ -208,7 +413,7 @@ def materialize_candidate_image(
                         client=http,
                         max_bytes=max_bytes,
                         accepted_media_prefixes=("image/",),
-                        validate_url=validate_url,
+                        validate_url=effective_validator,
                     )
                     break
                 except CaptureError as exc:
@@ -254,24 +459,45 @@ def capture_public_post(
         raise CaptureError("Refusing to capture a URL that is not a recognized post permalink")
 
     owns_client = client is None
-    http = client or httpx.Client(
-        timeout=timeout_seconds,
-        headers={"User-Agent": "FaceProof/0.1 evidence-capture"},
+    http = client or _public_http_client(timeout_seconds=timeout_seconds)
+    effective_validator = (
+        validate_url if validate_url is not None or not owns_client else _validate_public_url_syntax
     )
+    hostname = (urlsplit(candidate.normalized_url).hostname or "").lower()
+    use_bluesky_api = _host_matches(hostname, "bsky.app") and (
+        candidate.provider == "bluesky-public-api"
+    )
+    capture_method = "bluesky-public-api" if use_bluesky_api else "public-http"
     try:
-        hostname = (urlsplit(candidate.normalized_url).hostname or "").lower()
         if any(
             hostname == blocked or hostname.endswith(f".{blocked}")
             for blocked in _AUTOMATED_CAPTURE_DISABLED_HOSTS
         ):
             return _record_capture_disabled(candidate, destination)
         if hostname.endswith(("x.com", "twitter.com")):
-            return _capture_x_oembed(candidate, destination, client=http, validate_url=validate_url)
-        return _capture_public_html(candidate, destination, client=http, validate_url=validate_url)
+            return _capture_x_oembed(
+                candidate,
+                destination,
+                client=http,
+                validate_url=effective_validator,
+            )
+        if use_bluesky_api:
+            return _capture_bluesky_api(
+                candidate,
+                destination,
+                client=http,
+                validate_url=effective_validator,
+            )
+        return _capture_public_html(
+            candidate,
+            destination,
+            client=http,
+            validate_url=effective_validator,
+        )
     except CaptureError as exc:
         metadata = {
             "status": "unavailable",
-            "method": "public-http",
+            "method": capture_method,
             "page_url": candidate.normalized_url,
             "post_id": candidate.post_id,
             "post_identity_verified": False,
@@ -281,7 +507,7 @@ def capture_public_post(
         artifact = _write_json_artifact(destination / "capture_status.json", metadata)
         return PostCapture(
             status="unavailable",
-            method="public-http",
+            method=capture_method,
             artifacts=(artifact,),
             metadata=metadata,
         )
@@ -332,7 +558,7 @@ def inspect_image(
             image_format = (image.format or "").upper()
     except CaptureError:
         raise
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
         raise CaptureError("Candidate bytes are not a valid image") from exc
 
     formats = {
@@ -350,6 +576,49 @@ def inspect_image(
     return detected_type, extension
 
 
+def _read_identity_body(
+    response: httpx.Response,
+    *,
+    max_bytes: int,
+    total_timeout_seconds: float = 30.0,
+) -> bytes:
+    """Read an undecoded response body without ever crossing the byte limit."""
+
+    content_encoding = response.headers.get("content-encoding", "").strip().casefold()
+    if content_encoding not in {"", "identity"}:
+        raise CaptureError(f"Encoded response bodies are not allowed: {content_encoding}")
+    declared_length = response.headers.get("content-length")
+    if declared_length:
+        try:
+            parsed_length = int(declared_length)
+        except ValueError as exc:
+            raise CaptureError("Response has an invalid Content-Length") from exc
+        if parsed_length < 0:
+            raise CaptureError("Response has a negative Content-Length")
+        if parsed_length > max_bytes:
+            raise CaptureError(f"Response exceeds {max_bytes} bytes")
+    # Mock/custom transports may hand HTTPX an already-buffered response. The
+    # production transport never takes this branch; still enforce the limit
+    # before copying the injected bytes.
+    if response.is_stream_consumed:
+        buffered = response.content
+        if len(buffered) > max_bytes:
+            raise CaptureError(f"Response exceeds {max_bytes} bytes")
+        return buffered
+    deadline = time.monotonic() + max(total_timeout_seconds, 0.001)
+    output = bytearray()
+    # ``chunk_size=None`` is intentional: a fixed HTTPX chunk size can buffer
+    # an endless stream of smaller transport chunks without yielding here,
+    # which would bypass the cumulative deadline.
+    for chunk in response.iter_raw(chunk_size=None):
+        if time.monotonic() > deadline:
+            raise CaptureError("Response exceeded the total read deadline")
+        if len(chunk) > max_bytes - len(output):
+            raise CaptureError(f"Response exceeds {max_bytes} bytes")
+        output.extend(chunk)
+    return bytes(output)
+
+
 def fetch_public_bytes(
     url: str,
     *,
@@ -362,59 +631,112 @@ def fetch_public_bytes(
     validator = validate_url or validate_public_url
     current = url
     for _ in range(max_redirects + 1):
-        validator(current)
         try:
-            with client.stream("GET", current, follow_redirects=False) as response:
+            validator(current)
+        except CaptureError:
+            raise
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise CaptureError("Evidence URL validation failed") from exc
+        try:
+            with client.stream(
+                "GET",
+                current,
+                follow_redirects=False,
+                headers={"Accept-Encoding": "identity"},
+            ) as response:
                 if response.status_code in {301, 302, 303, 307, 308}:
                     location = response.headers.get("location")
                     if not location:
                         raise CaptureError("Redirect response had no Location header")
-                    current = urljoin(current, location)
+                    current = _safe_urljoin(current, location)
                     continue
                 response.raise_for_status()
                 media_type = response.headers.get("content-type", "application/octet-stream")
                 media_type = media_type.split(";", 1)[0].strip().lower()
                 if not any(media_type.startswith(prefix) for prefix in accepted_media_prefixes):
                     raise CaptureError(f"Unexpected content type: {media_type}")
-                declared_length = response.headers.get("content-length")
-                if declared_length:
-                    try:
-                        parsed_length = int(declared_length)
-                    except ValueError as exc:
-                        raise CaptureError("Response has an invalid Content-Length") from exc
-                    if parsed_length < 0:
-                        raise CaptureError("Response has a negative Content-Length")
-                    if parsed_length > max_bytes:
-                        raise CaptureError(f"Response exceeds {max_bytes} bytes")
-                output = bytearray()
-                for chunk in response.iter_bytes():
-                    output.extend(chunk)
-                    if len(output) > max_bytes:
-                        raise CaptureError(f"Response exceeds {max_bytes} bytes")
-                return bytes(output), media_type, current
-        except httpx.HTTPError as exc:
+                return (
+                    _read_identity_body(
+                        response,
+                        max_bytes=max_bytes,
+                        total_timeout_seconds=_client_read_timeout(client),
+                    ),
+                    media_type,
+                    current,
+                )
+        except CaptureError:
+            raise
+        except (httpx.HTTPError, httpx.InvalidURL, UnicodeError, ValueError) as exc:
             raise CaptureError(f"HTTP fetch failed ({type(exc).__name__})") from exc
     raise CaptureError(f"Too many redirects (>{max_redirects})")
 
 
 def validate_public_url(url: str) -> None:
     """Reject local/private network targets before evidence downloads."""
-    parts = urlsplit(url)
-    if parts.scheme.lower() != "https" or not parts.hostname:
-        raise CaptureError("Only HTTPS URLs are allowed for remote evidence")
-    if parts.username or parts.password:
-        raise CaptureError("URLs containing credentials are not allowed")
+    hostname, port = _parse_https_target(url)
     try:
-        default_port = 443 if parts.scheme.lower() == "https" else 80
-        addresses = socket.getaddrinfo(
-            parts.hostname, parts.port or default_port, type=socket.SOCK_STREAM
-        )
-    except OSError as exc:
-        raise CaptureError(f"Could not resolve host {parts.hostname!r}") from exc
+        addresses = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except (OSError, OverflowError, UnicodeError, ValueError) as exc:
+        raise CaptureError(f"Could not resolve host {hostname!r}") from exc
+    if not addresses:
+        raise CaptureError(f"Could not resolve host {hostname!r}")
     for address in addresses:
-        ip = ipaddress.ip_address(address[4][0])
-        if not ip.is_global:
+        try:
+            ip = ipaddress.ip_address(address[4][0])
+        except (IndexError, TypeError, ValueError) as exc:
+            raise CaptureError("Resolver returned an invalid destination") from exc
+        if not _is_allowed_public_ip(ip):
             raise CaptureError(f"Non-public target address is not allowed: {ip}")
+
+
+def _parse_https_target(url: str) -> tuple[str, int]:
+    if not isinstance(url, str) or not url or len(url) > 8192:
+        raise CaptureError("Evidence URL is empty or too long")
+    if any(ord(character) <= 0x20 or ord(character) == 0x7F for character in url):
+        raise CaptureError("Evidence URL contains control characters")
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname
+        port = parts.port
+        username = parts.username
+        password = parts.password
+    except (UnicodeError, ValueError) as exc:
+        raise CaptureError("Evidence URL is malformed") from exc
+    if parts.scheme.casefold() != "https" or not hostname:
+        raise CaptureError("Only HTTPS URLs are allowed for remote evidence")
+    if username or password:
+        raise CaptureError("URLs containing credentials are not allowed")
+    if port == 0:
+        raise CaptureError("Evidence URL has an invalid port")
+    try:
+        ascii_hostname = hostname.rstrip(".").encode("idna").decode("ascii")
+    except (UnicodeError, ValueError) as exc:
+        raise CaptureError("Evidence URL has an invalid hostname") from exc
+    if not ascii_hostname or len(ascii_hostname) > 253:
+        raise CaptureError("Evidence URL has an invalid hostname")
+    return ascii_hostname, port or 443
+
+
+def _validate_public_url_syntax(url: str) -> None:
+    """Validate syntax/literal IPs; the pinned transport validates DNS and the peer."""
+
+    hostname, _ = _parse_https_target(url)
+    try:
+        literal = ipaddress.ip_address(hostname)
+    except ValueError:
+        return
+    if not _is_allowed_public_ip(literal):
+        raise CaptureError(f"Non-public target address is not allowed: {literal}")
+
+
+def _safe_urljoin(base: str, reference: str) -> str:
+    try:
+        resolved = urljoin(base, reference)
+    except (UnicodeError, ValueError) as exc:
+        raise CaptureError("Remote response contained a malformed URL") from exc
+    if not isinstance(resolved, str):
+        raise CaptureError("Remote response contained a malformed URL")
+    return resolved
 
 
 def _capture_x_oembed(
@@ -428,22 +750,29 @@ def _capture_x_oembed(
     # endpoint directly so capture does not silently depend on redirect policy.
     endpoint = "https://publish.x.com/oembed"
     validator = validate_url or validate_public_url
-    validator(endpoint)
     try:
-        response = client.get(
+        validator(endpoint)
+    except CaptureError:
+        raise
+    except (OSError, OverflowError, UnicodeError, ValueError) as exc:
+        raise CaptureError("X oEmbed endpoint validation failed") from exc
+    params = {
+        "url": candidate.normalized_url,
+        "omit_script": "true",
+        "dnt": "true",
+    }
+    try:
+        _, body, raw_response, response_headers = _request_json_object(
+            client,
             endpoint,
-            params={
-                "url": candidate.normalized_url,
-                "omit_script": "true",
-                "dnt": "true",
-            },
+            params=params,
+            operation="X oEmbed capture",
+            max_bytes=1024 * 1024,
         )
-        response.raise_for_status()
-        body = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        raise CaptureError(f"X oEmbed capture failed: {exc}") from exc
+    except _JSONTransportFailure as exc:
+        raise CaptureError(str(exc)) from exc
 
-    if not isinstance(body, dict):
+    if body is None or raw_response is None:
         raise CaptureError("X oEmbed returned a non-object response")
     post_id = extract_post_id(candidate.normalized_url)
     identity_urls: list[str] = []
@@ -465,7 +794,7 @@ def _capture_x_oembed(
     media_relationship: str | None = None
     thumbnail_url = body.get("thumbnail_url")
     if isinstance(thumbnail_url, str) and thumbnail_url:
-        resolved_thumbnail_url = urljoin(candidate.normalized_url, thumbnail_url)
+        resolved_thumbnail_url = _safe_urljoin(candidate.normalized_url, thumbnail_url)
         with suppress(CaptureError):
             captured = _capture_remote_image(
                 resolved_thumbnail_url,
@@ -487,8 +816,14 @@ def _capture_x_oembed(
         "post_id": post_id,
         "post_identity_verified": True,
         "captured_at": _now_iso(),
+        "request": {
+            "method": "GET",
+            "endpoint": endpoint,
+            "parameters": params,
+        },
+        "raw_http_body_sha256": hashlib.sha256(raw_response).hexdigest(),
         "response": redact_secrets(body),
-        "response_headers": _safe_headers(response.headers),
+        "response_headers": response_headers,
         "linked_media": [item.to_dict() for item in captured_media],
         "face_match_eligible_media": [item.to_dict() for item in media_artifacts],
         "media_relationship": media_relationship or "page-preview-only",
@@ -500,6 +835,278 @@ def _capture_x_oembed(
         artifacts=(artifact, *captured_media),
         metadata=metadata,
         media_artifacts=tuple(media_artifacts),
+    )
+
+
+class _JSONTransportFailure(CaptureError):
+    """A transport failure before a trustworthy bounded JSON document existed."""
+
+
+def _request_json_object(
+    client: httpx.Client,
+    endpoint: str,
+    *,
+    params: Any,
+    operation: str,
+    allow_server_error: bool = False,
+    max_bytes: int = 8 * 1024 * 1024,
+) -> tuple[int, dict[str, Any] | None, bytes | None, dict[str, str]]:
+    try:
+        with client.stream(
+            "GET",
+            endpoint,
+            params=params,
+            follow_redirects=False,
+            headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+        ) as response:
+            status_code = response.status_code
+            response_headers = _safe_headers(response.headers)
+            if allow_server_error and 500 <= status_code <= 599:
+                try:
+                    error_body = _read_identity_body(
+                        response,
+                        max_bytes=min(max_bytes, 64 * 1024),
+                        total_timeout_seconds=_client_read_timeout(client),
+                    )
+                except CaptureError:
+                    error_body = None
+                return status_code, None, error_body or None, response_headers
+            if status_code != 200:
+                raise CaptureError(f"{operation} failed with HTTP {status_code}")
+            response_media_type = response.headers.get("content-type", "").split(";", 1)[0]
+            if response_media_type.casefold() != "application/json":
+                raise CaptureError(f"{operation} returned an unexpected content type")
+            raw_response = _read_identity_body(
+                response,
+                max_bytes=max_bytes,
+                total_timeout_seconds=_client_read_timeout(client),
+            )
+    except CaptureError:
+        raise
+    except (httpx.HTTPError, httpx.InvalidURL, UnicodeError, ValueError) as exc:
+        raise _JSONTransportFailure(f"{operation} transport failed ({type(exc).__name__})") from exc
+
+    if not raw_response:
+        raise CaptureError(f"{operation} returned an empty response")
+    try:
+        body = json.loads(
+            raw_response,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_json_constant,
+            parse_float=_finite_json_float,
+        )
+        _validate_json_tree(body)
+    except (RecursionError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise CaptureError(f"{operation} returned invalid JSON") from exc
+    if not isinstance(body, dict):
+        raise CaptureError(f"{operation} returned a non-object response")
+    return status_code, body, raw_response, response_headers
+
+
+def _capture_bluesky_api(
+    candidate: SearchCandidate,
+    destination: Path,
+    *,
+    client: httpx.Client,
+    validate_url: Callable[[str], None] | None,
+) -> PostCapture:
+    """Hydrate an exact CID-bound Bluesky post through the public AppView API."""
+
+    if candidate.provider != "bluesky-public-api":
+        raise CaptureError("Bluesky API capture requires a Bluesky connector candidate")
+    try:
+        evidence_ref = BlueskyEvidenceRef.parse(candidate.provider_item_id or "")
+        permalink_actor, permalink_rkey = parse_bluesky_permalink(candidate.normalized_url)
+    except ValueError as exc:
+        raise CaptureError(
+            "Bluesky capture requires the connector's exact AT-URI and CID evidence"
+        ) from exc
+    if (
+        permalink_actor != evidence_ref.did
+        or permalink_rkey != evidence_ref.rkey
+        or candidate.post_id != f"{evidence_ref.did}/{evidence_ref.rkey}"
+    ):
+        raise CaptureError("Bluesky permalink, post ID, and AT-URI do not agree")
+
+    validator = validate_url or validate_public_url
+    for endpoint in (BLUESKY_GET_POSTS_ENDPOINT, BLUESKY_GET_POST_THREAD_ENDPOINT):
+        try:
+            validator(endpoint)
+        except CaptureError:
+            raise
+        except (OSError, OverflowError, UnicodeError, ValueError) as exc:
+            raise CaptureError("Bluesky API endpoint validation failed") from exc
+
+    primary_params = [("uris", evidence_ref.at_uri)]
+    request_attempts: list[dict[str, Any]] = []
+    fallback_reason: str | None = None
+    try:
+        status_code, body, raw_response, response_headers = _request_json_object(
+            client,
+            BLUESKY_GET_POSTS_ENDPOINT,
+            params=primary_params,
+            operation="Bluesky getPosts capture",
+            allow_server_error=True,
+        )
+    except _JSONTransportFailure as exc:
+        fallback_reason = "transport-failure"
+        request_attempts.append(
+            {
+                "endpoint": BLUESKY_GET_POSTS_ENDPOINT,
+                "outcome": "fallback-trigger",
+                "failure": "transport",
+                "error_type": type(exc.__cause__).__name__ if exc.__cause__ else type(exc).__name__,
+            }
+        )
+    else:
+        if 500 <= status_code <= 599:
+            fallback_reason = f"http-{status_code}"
+            request_attempts.append(
+                {
+                    "endpoint": BLUESKY_GET_POSTS_ENDPOINT,
+                    "status_code": status_code,
+                    "outcome": "fallback-trigger",
+                    "raw_http_body_sha256": (
+                        hashlib.sha256(raw_response).hexdigest() if raw_response else None
+                    ),
+                    "response_headers": response_headers,
+                }
+            )
+        else:
+            request_attempts.append(
+                {
+                    "endpoint": BLUESKY_GET_POSTS_ENDPOINT,
+                    "status_code": status_code,
+                    "outcome": "selected",
+                    "raw_http_body_sha256": hashlib.sha256(raw_response or b"").hexdigest(),
+                    "response_headers": response_headers,
+                }
+            )
+
+    selected_endpoint = BLUESKY_GET_POSTS_ENDPOINT
+    selected_parameters: dict[str, Any] = {"uris": [evidence_ref.at_uri]}
+    if fallback_reason is not None:
+        selected_endpoint = BLUESKY_GET_POST_THREAD_ENDPOINT
+        selected_parameters = {
+            "uri": evidence_ref.at_uri,
+            "depth": 0,
+            "parentHeight": 0,
+        }
+        status_code, body, raw_response, response_headers = _request_json_object(
+            client,
+            selected_endpoint,
+            params=selected_parameters,
+            operation="Bluesky getPostThread fallback capture",
+        )
+        request_attempts.append(
+            {
+                "endpoint": selected_endpoint,
+                "status_code": status_code,
+                "outcome": "selected",
+                "raw_http_body_sha256": hashlib.sha256(raw_response or b"").hexdigest(),
+                "response_headers": response_headers,
+            }
+        )
+
+    if body is None or raw_response is None:
+        raise CaptureError("Bluesky public API did not provide a verifiable response")
+    if selected_endpoint == BLUESKY_GET_POSTS_ENDPOINT:
+        posts = body.get("posts")
+        if not isinstance(posts, list):
+            raise CaptureError("Bluesky getPosts response has no posts array")
+        matching_posts = [
+            item
+            for item in posts
+            if isinstance(item, dict) and item.get("uri") == evidence_ref.at_uri
+        ]
+        if len(posts) != 1 or len(matching_posts) != 1:
+            raise CaptureError("Bluesky getPosts did not return exactly the requested post")
+        selected_post = matching_posts[0]
+    else:
+        thread = body.get("thread")
+        if (
+            not isinstance(thread, dict)
+            or thread.get("$type") != "app.bsky.feed.defs#threadViewPost"
+            or not isinstance(thread.get("post"), dict)
+            or thread["post"].get("uri") != evidence_ref.at_uri
+        ):
+            raise CaptureError("Bluesky getPostThread did not return exactly the requested post")
+        selected_post = thread["post"]
+    try:
+        images = extract_bluesky_post_images(selected_post)
+    except ValueError as exc:
+        raise CaptureError("Bluesky public API returned malformed post-image evidence") from exc
+    matched_images = [item for item in images if item.ref == evidence_ref]
+    if len(matched_images) != 1:
+        raise CaptureError("Bluesky public API did not return the expected post and image CIDs")
+    image = matched_images[0]
+    if candidate.image_url != image.fullsize_url:
+        raise CaptureError("Bluesky candidate image URL changed before capture")
+
+    def validate_cdn_image(url: str) -> None:
+        try:
+            rendition, did, image_cid = parse_bluesky_cdn_url(url)
+        except ValueError as exc:
+            raise CaptureError("Bluesky media redirect left the allowlisted CDN") from exc
+        if rendition != "feed_fullsize" or did != image.did or image_cid != evidence_ref.image_cid:
+            raise CaptureError("Bluesky media URL does not carry the expected DID and image CID")
+        validator(url)
+
+    captured = _capture_remote_image(
+        image.fullsize_url,
+        destination / "post_media",
+        client=client,
+        validate_url=validate_cdn_image,
+    )
+    media_relationship = _post_media_relationship(
+        candidate.normalized_url,
+        captured.source_url or image.fullsize_url,
+    )
+    if media_relationship != "bluesky-feed-media":
+        raise CaptureError("Bluesky media did not remain on an eligible content CDN")
+
+    metadata = {
+        "status": "captured",
+        "method": "bluesky-public-api",
+        "page_url": candidate.normalized_url,
+        "post_id": candidate.post_id,
+        "post_identity_verified": True,
+        "captured_at": _now_iso(),
+        "request": {
+            "method": "GET",
+            "endpoint": selected_endpoint,
+            "parameters": selected_parameters,
+            "authentication": "none",
+        },
+        "request_attempts": request_attempts,
+        "fallback_from": (
+            {"endpoint": BLUESKY_GET_POSTS_ENDPOINT, "reason": fallback_reason}
+            if fallback_reason is not None
+            else None
+        ),
+        "raw_http_body_sha256": hashlib.sha256(raw_response).hexdigest(),
+        "response_headers": response_headers,
+        "response": redact_secrets(body),
+        "identifiers": {
+            "at_uri": evidence_ref.at_uri,
+            "did": evidence_ref.did,
+            "rkey": evidence_ref.rkey,
+            "post_cid": evidence_ref.post_cid,
+            "image_cid": evidence_ref.image_cid,
+        },
+        "image_cid_claim_source": "AT Protocol post record",
+        "downloaded_media_is_appview_rendition": True,
+        "linked_media": [captured.to_dict()],
+        "face_match_eligible_media": [captured.to_dict()],
+        "media_relationship": media_relationship,
+    }
+    artifact = _write_json_artifact(destination / "post_bluesky_api.json", metadata)
+    return PostCapture(
+        status="captured",
+        method="bluesky-public-api",
+        artifacts=(artifact, captured),
+        metadata=metadata,
+        media_artifacts=(captured,),
     )
 
 
@@ -577,7 +1184,7 @@ def _capture_public_html(
     media_relationship: str | None = None
     media_url = parser.values.get("og:image") or parser.values.get("twitter:image")
     if media_url:
-        resolved_media_url = urljoin(final_url, media_url)
+        resolved_media_url = _safe_urljoin(final_url, media_url)
         try:
             captured = _capture_remote_image(
                 resolved_media_url,
@@ -652,8 +1259,67 @@ def _safe_headers(headers: httpx.Headers) -> dict[str, str]:
     return {key.lower(): value for key, value in headers.items() if key.lower() in allowed}
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in output:
+            raise ValueError(f"duplicate JSON key: {key}")
+        output[key] = value
+    return output
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def _finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
+
+
+def _validate_json_tree(value: Any, *, max_depth: int = 64, max_nodes: int = 100_000) -> None:
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    nodes = 0
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if nodes > max_nodes:
+            raise ValueError("JSON document has too many values")
+        if depth > max_depth:
+            raise ValueError("JSON document is nested too deeply")
+        if isinstance(current, dict):
+            for key, item in current.items():
+                _reject_surrogates(key)
+                stack.append((item, depth + 1))
+        elif isinstance(current, list):
+            stack.extend((item, depth + 1) for item in current)
+        elif isinstance(current, str):
+            _reject_surrogates(current)
+        elif isinstance(current, float) and not math.isfinite(current):
+            raise ValueError("JSON document contains a non-finite number")
+
+
+def _reject_surrogates(value: str) -> None:
+    if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+        raise ValueError("JSON document contains a lone Unicode surrogate")
+
+
 def _write_json_artifact(path: Path, value: dict[str, Any]) -> CapturedFile:
-    raw = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    try:
+        raw = (
+            json.dumps(
+                value,
+                ensure_ascii=True,
+                allow_nan=False,
+                indent=2,
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
+        )
+    except (RecursionError, UnicodeEncodeError, ValueError) as exc:
+        raise CaptureError("Capture metadata could not be safely serialized") from exc
     path.write_bytes(raw)
     return CapturedFile(
         relative_path=path.name,

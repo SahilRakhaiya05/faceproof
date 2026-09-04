@@ -7,23 +7,27 @@ Task 3. It detects and encodes one face, performs a genuine live web search for
 public social-media candidates, independently compares the returned face,
 captures a deterministic evidence bundle, anchors a privacy-preserving
 commitment on an EVM blockchain, and re-verifies the result from the original
-files and public chain state.
+files and configured chain state.
 
 > **Status:** the offline pipeline, security gates, contract, and a real local
 > EVM deploy/anchor/re-verify/tamper path are tested. To complete the final live
-> demo record, use a consented, already-indexed public post and preserve its
-> end-to-end receipt. Base Sepolia is optional but provides a stronger durable,
-> publicly queryable proof than the rubric-valid local chain.
+> demo record, use a consented indexed post or the volunteer's public Bluesky
+> feed and preserve its end-to-end receipt. Base Sepolia is optional but
+> provides a stronger durable, publicly queryable proof than the rubric-valid
+> local chain.
 
 ## What the pipeline proves
 
 FaceProof makes four narrow, auditable claims:
 
 1. A specific model detected and encoded a face from supplied bytes.
-2. The client recorded an HTTPS response attributed to the configured live
-   provider, containing a candidate public URL at a recorded time.
-3. The client preserved a sanitized provider record, its exact-body digest,
-   and particular media and metadata bytes.
+2. The client recorded newly fetched HTTPS responses from the configured live
+   source at a recorded time. Lens responses contain result URLs; Bluesky
+   responses contain AT records and asset CIDs, from which FaceProof derives a
+   human-readable `bsky.app` display permalink locally. The AT URI is the
+   canonical protocol identifier.
+3. The client preserved sanitized response records, exact-body digests, and the
+   particular media and metadata bytes used in the decision.
 4. A wallet committed to that exact evidence no later than an on-chain block.
 
 It does **not** prove a person's legal identity, post authorship, truth,
@@ -39,11 +43,13 @@ Task 3 rubric requires a matching post, not automatic legal-name identification.
 consented image
   -> YuNet face detection / quality gate
   -> SFace aligned embedding
-  -> SerpApi Google Lens live query (cache disabled)
+  -> live source choice
+       -> SerpApi Lens: full-image exact + face-crop visual query
+       -> Bluesky: runtime consented author-feed scan (no key/query upload)
   -> stable social-post permalink filtering
   -> SFace re-match against returned candidate media
   -> public post identity/media capture and validation
-  -> explicit human approval of the exact permalink
+  -> explicit human approval of the exact permalink and captured content version
   -> RFC 8785 evidence manifest + SHA-256
   -> salted Keccak commitment
   -> EvidenceRegistry on local Anvil or Base Sepolia
@@ -51,21 +57,53 @@ consented image
 ```
 
 The blockchain stores only an opaque 32-byte commitment. Raw face images,
-biometric embeddings, usernames, post text, URLs, and API responses remain
-off-chain.
+usernames, post text, URLs, and API responses remain off-chain. However, a run
+directory deliberately retains plaintext copies of the query image, detected
+face preview/crop, and candidate/post media so it can be re-verified. Raw
+embedding vectors are not persisted; only their dimensions and SHA-256
+fingerprints are recorded. Treat every `evidence/` bundle as sensitive: keep it
+access-controlled, encrypt it for storage/transfer, and delete it on the agreed
+retention date.
 
-### Search modes and platform capability
+### Search sources, modes, and platform capability
 
-The local console and CLI expose two live SerpApi Lens modes:
+The local console and CLI expose two genuine, non-hardcoded discovery paths:
 
-- **Standard** sends one `all` Lens request and uses one SerpApi search credit.
-- **Deep** sends separate `exact_matches` and `visual_matches` requests and uses
-  two SerpApi search credits. It can improve coverage, but does not guarantee a
-  result.
+- **Bluesky public feed (zero-key):** scans `posts_with_media` for a consented
+  handle or DID supplied at run time. It fetches at most two pages of 50 feed
+  entries and emits at most 100 strictly CID-bound image candidates. The
+  user-selected 1–20 `max-candidates` limit counts unique post permalinks; once
+  a Bluesky post is admitted, every distinct CID-bound image on it remains
+  eligible for local matching. AT URI, post CID, image CID, and response digests
+  are bound into the evidence; the human-facing
+  `bsky.app` permalink is derived locally from the AT record. Selected media is
+  recaptured through `getPosts`, with a strict `getPostThread` fallback for
+  transient AppView 5xx/transport failures, and the query portrait is never
+  transmitted to Bluesky. This is the deterministic judge-demo path, not a
+  network-wide person search.
+- **SerpApi Google Lens (free quota):** searches the indexed web. **Standard**
+  sends one `all` request. **Deep** sends `exact_matches` using the full image
+  and `visual_matches` using the detected face crop. Deep uses two Lens search
+  credits; Standard uses one. Distinct full-image and thumbnail references for
+  the same post are evaluated separately so a useful face is not discarded by
+  URL de-duplication.
 
-The image upload and SerpApi account/quota check do not themselves consume a
-Lens search credit. Lens searches the public web globally; the platform choices
-in FaceProof only filter which returned URLs are evaluated locally.
+The Lens image upload and account/quota check do not consume a Lens search
+credit. Neither source guarantees a match: the content must actually be public
+and present in the chosen source. A completed search with no eligible candidate,
+no local threshold pass, or no independently capturable matching post is an
+honest `INCONCLUSIVE` run. Authentication, quota, transport, malformed-response,
+input/quality, configuration, and blockchain errors at their respective stages
+are hard failures. A candidate-specific media download/capture rejection is
+recorded and evaluation continues; it becomes inconclusive only if no eligible
+verified post remains. No outcome triggers a fixture fallback.
+
+The privacy trade-off differs materially. The zero-key Bluesky route does not
+receive the query portrait. Lens uploads a metadata-stripped derivative to
+SerpApi/Google; SerpApi's standard policy says search data is retained for 31
+days, while its no-retention ZeroTrace mode is Enterprise-only. A ten-minute
+`image_id` expiry is not a promise that every uploaded byte is deleted then.
+Obtain consent for this third-party processing before choosing Lens.
 
 X, Reddit, YouTube, and Bluesky have supported public post-capture paths and can
 complete the post-validation stage when their public response supplies the
@@ -83,10 +121,11 @@ anchor-eligible evidence.
 ## Requirements
 
 - Python 3.11 or newer
-- [`uv`](https://docs.astral.sh/uv/) (recommended) or `pip`
-- A [SerpApi Google Lens](https://serpapi.com/google-lens-api) account. Its
-  free plan currently includes 250 searches per month; no paid search provider
-  is required for the demo.
+- [`uv`](https://docs.astral.sh/uv/) **0.11.8** (enforced by `pyproject.toml`)
+- No search API key for the Bluesky author-feed path.
+- Optionally, a [SerpApi Google Lens](https://serpapi.com/google-lens-api)
+  account for broader web discovery. Its free-plan quota is displayed before a
+  run; a paid face-search product is not required.
 - A clean, tracked Git checkout whose exact commit is recorded for anchored runs
 - For the zero-cost local demo: Foundry (`forge` and `anvil`); no wallet or
   faucet is needed
@@ -100,18 +139,25 @@ minors, private people, or people in sensitive contexts.
 ## Quick start
 
 ```powershell
-uv sync --python 3.11 --extra dev
-Copy-Item .env.example .env
+uv --version
+uv sync --locked --python 3.11 --extra dev
+if (-not (Test-Path -LiteralPath .env)) {
+  Copy-Item -LiteralPath .env.example -Destination .env
+}
 uv run faceproof models download
 uv run faceproof doctor
 ```
 
-Add provider and chain settings to `.env`; never commit that file.
-See [`docs/SETUP.md`](docs/SETUP.md) for the complete free-tier key, testnet,
-deployment, live-run, and re-verification walkthrough.
-For a final demo, set `FACEPROOF_SOURCE_REVISION` to the exact output of
-`git rev-parse HEAD`, then require every readiness gate with
-`uv run faceproof doctor --demo`.
+The conditional copy intentionally never overwrites an existing `.env`.
+
+The zero-key Bluesky plus local-chain path needs no secret in `.env`. Add
+SerpApi or public-chain settings only for those optional routes; never commit
+that file. See [`docs/SETUP.md`](docs/SETUP.md) for both demo paths.
+For a Base Sepolia demo, set `FACEPROOF_SOURCE_REVISION` to the exact output of
+`git rev-parse HEAD`, then require every persistent-chain readiness gate with
+`uv run faceproof doctor --demo`. The zero-cost `local-demo` launcher instead
+checks the clean revision and creates/verifies its disposable chain itself; a
+normal `uv run faceproof doctor` is sufficient before launching it.
 
 ### Local judge console
 
@@ -123,21 +169,26 @@ uv run faceproof web
 
 The console opens at `http://127.0.0.1:8787` and binds only to this computer.
 Do not proxy it or expose it to a LAN or the public internet. It guides the
-operator through the consent gates, image selection, Standard or Deep live
-search, candidate review, evidence verification, download, and tamper test.
+operator through consent, a zero-credit local face preflight, source selection,
+live search, candidate review, evidence verification, download, and tamper
+test.
 
 Anchoring in the console is intentionally a two-pass operation:
 
 1. Run an unanchored live discovery and inspect the dynamically returned post.
-2. Select **Review & prepare anchor** for that exact permalink.
-3. Re-acknowledge the irreversible commitment and run a second fresh,
-   cache-disabled search.
-4. Anchor only if the approved URL reappears and passes the local face,
-   permalink, capture, and post-media gates again.
+2. Select **Review & prepare anchor** for that exact permalink and captured
+   content/media identity.
+3. Re-acknowledge the irreversible commitment and run a second fresh provider
+   request. Lens explicitly sends `no_cache=true`; Bluesky refetches the public
+   author feed and does not claim an upstream cache-control switch.
+4. Anchor only if the approved URL reappears and the exact reviewed content
+   identity also matches: Bluesky binds AT URI/post/image CIDs; Lens binds the
+   candidate and captured media hashes plus stable captured post metadata.
 
-The second pass consumes another one or two SerpApi credits according to the
-search mode recorded by the reviewed discovery. Closing the console does not
-make an incomplete run successful; inspect the evidence history after restart.
+The second pass replays the sealed source, resolved Bluesky DID/filter, search
+mode, and face threshold. It is
+still zero-key on Bluesky; Lens consumes another one or two credits. Closing
+the console does not make an incomplete run successful.
 
 For a complete blockchain demo with no wallet, faucet, or chain API key, use:
 
@@ -153,15 +204,40 @@ through discovery, reviewed anchoring, verification, and the tamper test because
 the local chain is intentionally ephemeral. Use Base Sepolia for a public,
 third-party-verifiable submission record.
 
+For this disposable mode, run **Verify** and **Tamper test** inside the Console
+while `local-demo` is still running; that server alone holds the generated RPC,
+wallet, and contract settings. A separate CLI process can independently verify
+only a persistent chain whose trusted RPC, chain ID, contract address, and code
+hash are configured in its environment (for example Base Sepolia or an Anvil
+node you started and kept running yourself).
+
 ### Discover, review, then run the full pipeline
 
 Put a consented local image at `samples/consented-person.jpg` (the directory is
-Git-ignored). First perform an unanchored discovery run so a human can inspect
-the dynamically returned permalink:
+Git-ignored). First check it locally; this does not search, upload, persist an
+embedding, or consume a credit:
+
+```powershell
+uv run faceproof scan --image .\samples\consented-person.jpg --i-have-consent
+```
+
+For the no-key route, publish the volunteer image in a real public post on an
+account they control, then scan that live account feed. The handle is supplied
+at run time and the URL is not preselected:
 
 ```powershell
 uv run faceproof run --image .\samples\consented-person.jpg `
   --live --i-have-consent --skip-anchor `
+  --search-provider bluesky `
+  --bluesky-actor volunteer.bsky.social
+```
+
+For broader indexed-web discovery, select Lens:
+
+```powershell
+uv run faceproof run --image .\samples\consented-person.jpg `
+  --live --i-have-consent --skip-anchor `
+  --search-provider lens `
   --search-mode standard
 ```
 
@@ -170,7 +246,8 @@ search and approve that exact URL for anchoring. The command fails if the URL is
 not returned, does not independently face-match, or cannot be captured as a
 real post permalink.
 
-SerpApi Google Lens with cache explicitly disabled:
+The anchor command reuses the reviewed run's sealed provider, resolved actor
+DID/filter, input image, mode, and face threshold, regardless of new CLI values:
 
 ```powershell
 uv run faceproof run --image .\samples\consented-person.jpg `
@@ -180,8 +257,9 @@ uv run faceproof run --image .\samples\consented-person.jpg `
   --approve-post-url "https://www.reddit.com/r/example/comments/abc/example"
 ```
 
-Use `--search-mode deep` when the extra exact-plus-visual query is worth two
-credits. To show optional LinkedIn profile leads, add
+Use `--search-provider lens --search-mode deep` when the full-image
+exact-plus-face-crop visual search is worth two credits. To show optional
+LinkedIn profile leads on the Lens route, add
 `--check-linkedin-profiles`; those leads remain in a separate, non-anchorable
 section and cannot make an otherwise inconclusive run pass.
 
@@ -189,15 +267,23 @@ Development without a blockchain write is deliberately explicit:
 
 ```powershell
 uv run faceproof run --image .\samples\consented-person.jpg `
-  --live --i-have-consent --skip-anchor
+  --live --i-have-consent --skip-anchor `
+  --search-provider bluesky `
+  --bluesky-actor volunteer.bsky.social
 ```
 
 ### Re-verify and demonstrate tampering
 
 ```powershell
-uv run faceproof verify .\evidence\<run-id>
+uv run faceproof verify .\evidence\<unanchored-run-id> --allow-unanchored
+uv run faceproof verify .\evidence\<anchored-run-id>
 uv run faceproof tamper-demo .\evidence\<run-id>
 ```
+
+`--allow-unanchored` verifies bundle integrity but deliberately cannot report an
+on-chain pass. For a `local-demo` anchor, use the Console verification before
+stopping the ephemeral chain. Use the CLI-from-a-fresh-process demonstration
+for a persistent configured chain.
 
 For the strongest independent check, copy the commitment and transaction hash
 from the demo record or explorer—not from the evidence directory—and pass them
@@ -247,11 +333,16 @@ inclusion from later Ethereum L1 batch finality.
 
 Each `evidence/<run-id>/` directory contains:
 
+- plaintext query-image, detected-face preview/crop, and downloaded candidate
+  or post-media artifacts (sensitive; access-control, encrypt, and delete them
+  under the volunteer's retention agreement);
 - a sanitized parsed provider receipt plus the SHA-256 of the exact HTTP
   response bytes;
 - candidate image bytes returned or referenced by the provider;
-- Lens web labels, result title/source, and the exact matched-image path/hash,
-  with label provenance explicitly marked unverified;
+- source-specific provenance: Lens lane/input hashes and search IDs, or Bluesky
+  AT URI/post CID/image CID plus public-API response hashes;
+- result title/source and the exact matched-image path/hash; Lens labels, when
+  present, are explicitly marked unverified;
 - independently validated public-post metadata and, where exposed, post media;
 - `manifest.json`, containing hashes and model/search/match metadata;
 - `manifest.canonical.json`, the RFC 8785 canonical bytes;
@@ -275,6 +366,14 @@ Recovery is read-only on-chain: it never signs or broadcasts. It accepts only
 the saved transaction hash after checking its signer, nonce, calldata, receipt,
 event, registry record, contract bytecode, and confirmations.
 
+Each discovery is single-use for anchoring. Before the fresh anchor pass,
+FaceProof atomically creates `.DISCOVERY_RUN_ID.anchor-claim.json` outside the
+bundle. It remains after any outcome so an already-used or unresolved review
+cannot authorize a duplicate transaction; after a failed attempt, run a fresh
+discovery before trying again. This is a local evidence-root control: copying
+the bundle to a different root or deleting its sibling claim file defeats it,
+so the operator must preserve the entire evidence root.
+
 The raw provider body itself is not retained because it may echo credentials;
 the digest identifies those received bytes but cannot reconstruct them.
 
@@ -286,52 +385,74 @@ commitment = keccak256(ABI.encode(manifest_hash, salt32))
 ## Tests
 
 ```powershell
+uv sync --locked --python 3.11 --extra dev
 uv run pytest --cov=faceproof --cov-report=term --cov-fail-under=70
 uv run ruff check .
 uv run ruff format --check .
 uv run bandit -q -r src/faceproof
+uv export --frozen --extra dev --no-emit-project --no-hashes `
+  --output-file audit-requirements.txt
+uv run pip-audit --strict --progress-spinner off -r audit-requirements.txt
+uv build
 ```
 
 Contract tests:
 
 ```powershell
 Set-Location contracts
+forge fmt --check
 forge test -vv
+Set-Location ..
+$env:FACEPROOF_RUN_ANVIL_INTEGRATION = "1"
+uv run pytest -q tests/integration/test_chain_anvil.py
 ```
+
+CI pins Foundry v1.8.1. If `forge`/`anvil` are not on `PATH`, set the optional
+absolute launcher overrides shown in `.env.example` for `local-demo`. Export
+those same variables in the current PowerShell session for the direct pytest
+integration command; manual `forge`/`cast` commands still require their
+executable directory on `PATH`.
 
 ### Measured face-verification baseline
 
-The reproducible LFW View 2 run measured **99.20% accuracy on the 4,126
-scored pairs**, but the strict one-face/quality policy scored only **68.77% of
-all 6,000 pairs**. The more honest all-pair correct-and-scored yield is
-**68.22%**. These figures measure 1:1 face verification, not web-search recall
-or open-set identification. See [`docs/ACCURACY_VALIDATION.md`](docs/ACCURACY_VALIDATION.md)
+The pinned FaceProof 0.2.0 benchmark source measured **99.20% accuracy on the
+4,126 scored pairs**, but the strict one-face/quality policy scored only
+**68.77% of all 6,000 pairs**. The more honest all-pair correct-and-scored yield
+is **68.22%**. Version 0.4.0 retains the model/scoring policy but added an input
+safety gate, so a new benchmark is required before calling this an exact-source
+0.4.0 reproduction. These figures measure 1:1 face verification, not web-search
+recall or open-set identification. See [`docs/ACCURACY_VALIDATION.md`](docs/ACCURACY_VALIDATION.md)
 for confidence intervals, FAR/FRR, dataset/model hashes, reproduction steps,
 and limitations.
 
-Live provider tests are not run in CI because they consume credits and process
-biometric data. Unit tests use clearly labelled synthetic responses and never
-fall back to those responses from a live run.
+Live provider tests are not run in CI because they make real external requests
+and the Lens route consumes credits/processes biometric data. Unit tests use
+clearly labelled synthetic responses and never fall back to them at runtime.
 
 ## Demo checklist
 
 1. Show the consented input and current time.
-2. Open `faceproof web`, run discovery, show the reviewed permalink, then run
-   the fresh anchor pass for that exact URL.
+2. Open `faceproof web`, run discovery, show the reviewed permalink and content
+   identity, then run the fresh anchor pass for that exact version.
 3. Show detection, quality result, model fingerprints and embedding fingerprint.
-4. Show provider search ID, timestamp and dynamically returned candidates.
-5. Show the unverified web label, selected post title/source, exact matched
-   image, and independent local face score versus its frozen threshold.
+4. Show Lens provider search IDs, or the FaceProof-derived Bluesky capture/page
+   IDs alongside their response hashes; do not call the latter provider-issued
+   IDs. Show the retrieval timestamp and dynamically returned records.
+5. Show the selected post title/source, exact matched image, AT CIDs or Lens
+   lane provenance, and independent local face score versus its threshold.
 6. Show the evidence commitment and successful EVM transaction/read-back.
 7. For Base Sepolia, open the explorer transaction; for Anvil, show the local
    receipt and registry verification in the console.
-8. Run `faceproof verify` from a new process with the independently copied
-   commitment and transaction hash; show a passing result.
-9. Run `faceproof tamper-demo` and show the changed copy fail.
+8. For Base Sepolia or another persistent configured chain, run
+   `faceproof verify` from a new process with the independently copied
+   commitment and transaction hash. For `local-demo`, use Console **Verify**
+   while its Anvil process is alive.
+9. Run `faceproof tamper-demo` on a persistent-chain bundle, or the Console
+   tamper action during `local-demo`, and show the changed copy fail.
 
-Pre-fund the wallet, mask API keys, disable notifications, and prepare more than
-one consenting, already-indexed test case. Never present cached or fixture data
-as a live search.
+Pre-fund the wallet when using Base Sepolia, mask API keys, disable
+notifications, and prepare more than one consenting test case. Never present
+cached or fixture data as a live search.
 
 ## Security and privacy controls
 
@@ -343,15 +464,25 @@ as a live search.
   post permalinks with stable IDs can become anchor-eligible. Opted-in LinkedIn
   profiles remain separately labelled leads.
 - An anchored run requires successful public post-identity capture and explicit
-  approval of the exact permalink.
+  approval of the exact permalink plus the captured content version. A fresh
+  pass must reproduce its content identity before any chain write.
+- Review authorization, manifest content checks, evidence ZIP export, and public
+  receipt generation use immutable snapshots so verified bytes cannot be
+  replaced between verification and use.
 - Remote evidence requires HTTPS and rejects private/local network addresses.
+- Capture pins each validated public DNS answer to the actual TCP peer, rejects
+  redirects to other/private targets, and refuses compressed or oversized
+  response bodies before decoding.
 - Every live run verifies the exact pinned YuNet/SFace file sizes and hashes.
 - Anchored runs bind a clean Git commit and pinned registry bytecode hash.
 - Public page capture never logs in or bypasses access controls.
 - API keys and wallet keys are environment-only and excluded by `.gitignore`.
 - Only a random-salted commitment is public on-chain.
-- Search failure returns `inconclusive`; no hardcoded URL or hidden fixture is
-  substituted.
+- A successfully completed search/capture path with no eligible verified post
+  returns `inconclusive`; candidate-specific download/capture rejections can
+  contribute to that result. Provider-search, input, configuration, and chain
+  faults fail explicitly. Neither path substitutes a hardcoded URL or hidden
+  fixture.
 
 The detailed assumptions, trust boundaries, threats, and residual risks are in
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
@@ -359,12 +490,17 @@ The detailed assumptions, trust boundaries, threats, and residual risks are in
 The judge-facing completion gates and demo sequence are in
 [`docs/SUBMISSION_PLAN.md`](docs/SUBMISSION_PLAN.md). A sourced technology,
 product, paper, and comparable-project review is in
-[`docs/RESEARCH.md`](docs/RESEARCH.md).
+[`docs/RESEARCH.md`](docs/RESEARCH.md). A commit-pinned comparison of HHGoa
+Task 3 repositories and the failure patterns avoided here is in
+[`docs/COMPETITOR_AUDIT.md`](docs/COMPETITOR_AUDIT.md).
 
 ## Known limitations
 
 - Web indexes are incomplete and change continuously. Private, login-only,
   newly published, or robots-excluded posts may not be found.
+- The zero-key Bluesky route searches only the explicitly supplied consented
+  account's public media feed; it does not discover an unknown account or
+  search the whole Bluesky network.
 - Face similarity can produce false matches and false non-matches, especially
   with poor image quality, age/pose changes, occlusion, or demographic bias.
 - A browser/API capture proves what this client recorded, not that the platform
@@ -382,6 +518,18 @@ product, paper, and comparable-project review is in
 - Base Sepolia proves public inclusion and integrity, not the truth of off-chain
   claims.
 - SerpApi is a third-party Google Lens scraper, not an official Google API.
+- Standard SerpApi search data is retained for 31 days under its published
+  policy; no-retention ZeroTrace is Enterprise-only. Lens therefore requires
+  separate informed consent for third-party image processing.
+- The single-use review claim is enforced by the CLI/web workflow inside one
+  preserved evidence root. A trusted local operator can defeat that policy by
+  copying bundles, deleting sidecars, changing roots, or calling low-level
+  Python functions with fabricated lineage values.
+- DNS resolution and streamed reads have explicit cumulative deadlines, but an
+  in-process deadline may overshoot one blocking socket-read interval and a
+  timed-out OS resolver thread can continue in the background until the OS
+  returns. A production deployment should still use a controlled egress proxy
+  and process boundary for hard resource isolation.
 - Raw evidence may contain personal or copyrighted data and must be retained,
   shared, and deleted under an explicit policy.
 

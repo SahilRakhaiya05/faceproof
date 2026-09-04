@@ -931,11 +931,12 @@ wheels = [
 
 [[package]]
 name = "faceproof"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "eth-abi" },
     { name = "fastapi" },
+    { name = "httpcore" },
     { name = "httpx" },
     { name = "jsonschema" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -966,7 +967,8 @@ requires-dist = [
     { name = "bandit", marker = "extra == 'dev'", specifier = ">=1.8,<2" },
     { name = "eth-abi", specifier = ">=5.2,<6" },
     { name = "fastapi", specifier = ">=0.116,<1" },
-    { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "httpcore", specifier = "==1.0.9" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "jsonschema", specifier = ">=4.25,<5" },
     { name = "numpy", specifier = ">=2.0,<3" },
     { name = "opencv-python-headless", specifier = ">=4.11,<5" },

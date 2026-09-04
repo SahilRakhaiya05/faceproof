@@ -198,6 +198,10 @@ a { color: inherit; text-decoration: none; }
 .range-field output { color: var(--accent); font: 10px ui-monospace, monospace; }
 .range-field input { width: 100%; accent-color: var(--accent); height: 3px; }
 .form-error { padding: 10px 12px; margin-top: 15px; background: rgba(255,118,111,.08); border: 1px solid rgba(255,118,111,.22); border-radius: 9px; color: #ffaaa5; font-size: 10px; }
+.preflight-box { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.preflight-box .button { width: 100%; min-height: 38px; }
+.preflight-box > small { display: block; margin-top: 7px; color: var(--dim); font-size: 8px; text-align: center; }
+.preflight-box .inline-message { line-height: 1.55; }
 .run-button { width: 100%; margin-top: 20px; }
 .local-note { color: var(--dim); font-size: 8px; text-align: center; margin: 10px 10px 0; }
 

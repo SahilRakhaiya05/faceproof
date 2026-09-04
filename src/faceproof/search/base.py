@@ -26,6 +26,7 @@ SOCIAL_HOSTS = frozenset(
         "www.tiktok.com",
         "www.twitter.com",
         "www.x.com",
+        "youtu.be",
         "youtube.com",
         "www.youtube.com",
     }
@@ -348,11 +349,17 @@ def filter_social_candidates(
     limit: int | None = None,
     platforms: frozenset[str] | None = None,
 ) -> list[SearchCandidate]:
-    """Filter to stable social-post permalinks and de-duplicate normalized URLs."""
+    """Filter stable social posts while preserving provider-bound media variants.
+
+    ``limit`` counts unique post permalinks. Bluesky variants are CID-bound;
+    SerpApi variants retain distinct provider-result media references for local
+    re-matching. Unbound duplicate URLs stay collapsed.
+    """
     if limit is not None and limit <= 0:
         return []
     result: list[SearchCandidate] = []
-    seen: set[str] = set()
+    admitted_posts: set[str] = set()
+    seen_entries: set[tuple[str, str | None]] = set()
     for candidate in sorted(candidates, key=lambda item: item.rank):
         try:
             normalized_url = normalize_page_url(candidate.normalized_url)
@@ -365,12 +372,30 @@ def filter_social_candidates(
             or not _platform_allowed(normalized_url, platforms)
         ):
             continue
-        if normalized_url in seen:
+        provider_bound_variant = (
+            candidate.provider == "bluesky-public-api"
+            and isinstance(candidate.provider_item_id, str)
+            and bool(candidate.provider_item_id)
+        ) or (
+            candidate.provider == "serpapi"
+            and isinstance(candidate.provider_item_id, str)
+            and bool(candidate.provider_item_id)
+            and bool(candidate.image_url or candidate.thumbnail_url or candidate.thumbnail_base64)
+        )
+        entry_key = (
+            normalized_url,
+            candidate.provider_item_id if provider_bound_variant else None,
+        )
+        if entry_key in seen_entries:
             continue
-        seen.add(normalized_url)
+        if normalized_url not in admitted_posts:
+            if limit is not None and len(admitted_posts) >= limit:
+                continue
+            admitted_posts.add(normalized_url)
+        elif not provider_bound_variant:
+            continue
+        seen_entries.add(entry_key)
         result.append(replace(candidate, normalized_url=normalized_url, post_id=post_id))
-        if limit is not None and len(result) >= limit:
-            break
     return result
 
 

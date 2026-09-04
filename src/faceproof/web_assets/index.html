@@ -56,7 +56,7 @@
           </div>
           <div class="readiness-row">
             <span class="readiness-icon" data-ready-icon="search">02</span>
-            <span><strong>Live web search</strong><small id="search-detail">Checking free-tier quota…</small></span>
+            <span><strong id="search-name">Live discovery source</strong><small id="search-detail">Checking source…</small></span>
             <span id="search-state" class="mini-state">—</span>
           </div>
           <div class="readiness-row">
@@ -90,8 +90,8 @@
           <div class="card-number">02</div>
           <div class="line-icon search-icon" aria-hidden="true"></div>
           <h3>Discover &amp; re-match</h3>
-          <p>Google Lens returns live candidates. FaceProof downloads returned media and independently compares every eligible public post.</p>
-          <span class="technology">SerpApi · Google Lens · no cache</span>
+          <p>Google Lens or a consented public Bluesky feed returns live candidates. FaceProof downloads media and independently compares every eligible post.</p>
+          <span class="technology">Lens or Bluesky · local re-match · no fixture</span>
         </article>
         <article class="pipeline-card">
           <div class="card-number">03</div>
@@ -144,8 +144,13 @@
             <p class="field-help">The operator attests that the subject:</p>
             <label class="check-row"><input id="consent-adult" type="checkbox"><span class="custom-check"></span><span>is an adult and explicitly authorized this test</span></label>
             <label class="check-row"><input id="consent-authorized" type="checkbox"><span class="custom-check"></span><span>owns or authorized the public post being searched</span></label>
-            <label class="check-row"><input id="consent-search" type="checkbox"><span class="custom-check"></span><span>understands this searches public web indexes</span></label>
-            <label class="check-row"><input id="consent-upload" type="checkbox"><span class="custom-check"></span><span>allows a metadata-stripped copy to reach SerpApi</span></label>
+            <label class="check-row"><input id="consent-search" type="checkbox"><span class="custom-check"></span><span>understands this reads public web or social content</span></label>
+            <label id="provider-upload-row" class="check-row"><input id="consent-upload" type="checkbox"><span class="custom-check"></span><span id="provider-upload-copy">allows a metadata-stripped copy to reach SerpApi</span></label>
+            <div class="preflight-box">
+              <button id="preflight-button" class="button button-ghost" type="button">Check face locally · 0 credits</button>
+              <p id="preflight-result" class="inline-message hidden" role="status"></p>
+              <small>No web request, no image upload, no saved face embedding.</small>
+            </div>
           </fieldset>
 
           <fieldset class="form-section">
@@ -162,10 +167,19 @@
           </fieldset>
 
           <fieldset class="form-section">
-            <legend><span>4</span> Search strategy</legend>
+            <legend><span>4</span> Search source &amp; strategy</legend>
+            <div class="strategy-grid source-grid">
+              <label class="strategy-card"><input type="radio" name="search-provider" value="bluesky" checked><span><strong>Bluesky feed</strong><small>No key · query stays local</small></span></label>
+              <label class="strategy-card"><input type="radio" name="search-provider" value="lens"><span><strong>Web-wide Lens</strong><small>Free quota · query uploaded</small></span></label>
+            </div>
+            <div id="bluesky-options">
+              <label class="text-field"><span>Consented public Bluesky handle or DID</span><input id="bluesky-actor" type="text" maxlength="2048" placeholder="volunteer.bsky.social"></label>
+              <p class="capability-note"><strong>Deterministic judge demo:</strong> post the volunteer image on this public account, then FaceProof scans its live media feed and chooses by local face similarity. The input portrait is never sent to Bluesky.</p>
+            </div>
+            <div id="lens-options" class="hidden">
             <div class="strategy-grid">
-              <label class="strategy-card"><input type="radio" name="search-mode" value="standard" checked><span><strong>Standard</strong><small>Visual matches · 1 credit</small></span></label>
-              <label class="strategy-card"><input type="radio" name="search-mode" value="deep"><span><strong>Deep</strong><small>Exact + visual · 2 credits</small></span></label>
+              <label class="strategy-card"><input type="radio" name="search-mode" value="standard" checked><span><strong>Standard</strong><small>All matches · 1 credit</small></span></label>
+              <label class="strategy-card"><input type="radio" name="search-mode" value="deep"><span><strong>Deep</strong><small>Full-image exact + face-focused visual · 2 credits</small></span></label>
             </div>
             <p class="field-help">Lens searches globally; these chips control which returned post links can enter the strict capture-and-match lane.</p>
             <div id="platforms" class="platform-chips">
@@ -183,6 +197,7 @@
               <span><strong>Check public LinkedIn profile leads</strong><small>Separate consented lane using Lens thumbnails only; independent of post chips and never anchor-eligible</small></span>
               <input id="profile-discovery" type="checkbox"><span class="switch"></span>
             </label>
+            </div>
             <label class="range-field"><span><strong>Post candidates to re-match</strong><output id="candidate-count">10</output></span><input id="max-candidates" type="range" min="1" max="20" value="10"></label>
           </fieldset>
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import io
 import math
 import os
 import threading
@@ -22,10 +23,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from PIL import Image, UnidentifiedImageError
+
 # OpenCV's SFace tutorial reports 0.363 as an LFW cosine threshold.  It is a
 # useful demo default, not a universal operating point; deployments must tune it
 # on representative data and usually choose a stricter threshold for web search.
 DEFAULT_COSINE_THRESHOLD = 0.363
+MAX_ENCODED_IMAGE_BYTES = 25 * 1024 * 1024
+MAX_DECODED_IMAGE_PIXELS = 40_000_000
 
 
 class FaceError(RuntimeError):
@@ -576,6 +581,36 @@ def _optional_import(module_name: str, install_hint: str) -> Any:
         ) from exc
 
 
+def _validate_encoded_image(source: Path | bytes) -> None:
+    """Reject unsafe encoded dimensions before OpenCV allocates decoded pixels."""
+
+    if isinstance(source, Path):
+        if not source.is_file():
+            raise FaceInputError(f"image file does not exist: {source}")
+        try:
+            byte_size = source.stat().st_size
+        except OSError as exc:
+            raise FaceInputError(f"image file cannot be inspected: {source}") from exc
+        payload: Path | io.BytesIO = source
+    else:
+        byte_size = len(source)
+        payload = io.BytesIO(source)
+    if byte_size <= 0:
+        raise FaceInputError("encoded image bytes cannot be empty")
+    if byte_size > MAX_ENCODED_IMAGE_BYTES:
+        raise FaceInputError(f"image exceeds {MAX_ENCODED_IMAGE_BYTES} encoded bytes")
+    try:
+        with Image.open(payload) as opened:
+            width, height = opened.size
+            if width <= 0 or height <= 0 or width * height > MAX_DECODED_IMAGE_PIXELS:
+                raise FaceInputError(f"image exceeds {MAX_DECODED_IMAGE_PIXELS} decoded pixels")
+            opened.verify()
+    except FaceInputError:
+        raise
+    except (Image.DecompressionBombError, UnidentifiedImageError, OSError, ValueError) as exc:
+        raise FaceInputError("image is not a safe, decodable image") from exc
+
+
 class OpenCVFaceBackend:
     """Lazy OpenCV YuNet detector and SFace embedding backend.
 
@@ -684,6 +719,11 @@ class OpenCVFaceBackend:
             self._recognizer = recognizer
 
     def _coerce_image(self, image: Any) -> Any:
+        if isinstance(image, (str, os.PathLike)):  # noqa: UP038 - Python 3.9 tests
+            _validate_encoded_image(Path(image))
+        elif isinstance(image, (bytes, bytearray, memoryview)):  # noqa: UP038
+            _validate_encoded_image(bytes(image))
+
         self._ensure_loaded()
         cv2 = self._cv2
         np = self._np
@@ -714,6 +754,8 @@ class OpenCVFaceBackend:
         shape = tuple(int(value) for value in image.shape)
         if len(shape) not in (2, 3) or shape[0] <= 0 or shape[1] <= 0:
             raise FaceInputError(f"unsupported image shape: {shape}")
+        if shape[0] * shape[1] > MAX_DECODED_IMAGE_PIXELS:
+            raise FaceInputError(f"image exceeds {MAX_DECODED_IMAGE_PIXELS} decoded pixels")
         if image.dtype != np.uint8:
             raise FaceInputError("image arrays must use uint8 pixels")
         if len(shape) == 2:

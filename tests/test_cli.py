@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import struct
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -82,6 +84,53 @@ def test_scan_refuses_untrusted_model_files(tmp_path: Path, monkeypatch) -> None
     assert "model integrity" in result.output
 
 
+def test_scan_rejects_decompression_bomb_before_opencv_decode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bomb = tmp_path / "bomb.bmp"
+    bomb.write_bytes(
+        b"BM"
+        + struct.pack("<IHHI", 54, 0, 0, 54)
+        + struct.pack(
+            "<IiiHHIIiiII",
+            40,
+            100_000,
+            100_000,
+            1,
+            24,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_settings",
+        lambda: SimpleNamespace(
+            model_dir=tmp_path / "models",
+            yunet_model=tmp_path / "models" / "yunet.onnx",
+            sface_model=tmp_path / "models" / "sface.onnx",
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "verify_default_models",
+        lambda _directory: {"yunet.onnx": "ok", "sface.onnx": "ok"},
+    )
+
+    result = runner.invoke(
+        cli_module.app,
+        ["scan", "--image", str(bomb), "--i-have-consent"],
+    )
+
+    assert result.exit_code == 2
+    assert "decoded pixels" in result.output or "safe, decodable" in result.output
+
+
 def test_successful_unanchored_run_renders_release_evidence(tmp_path: Path, monkeypatch) -> None:
     run_dir = tmp_path / "evidence" / "run-123"
     run_dir.mkdir(parents=True)
@@ -137,6 +186,8 @@ def test_successful_unanchored_run_renders_release_evidence(tmp_path: Path, monk
     assert observed["live"] is True
     assert observed["consent_acknowledged"] is True
     assert observed["skip_anchor"] is True
+    assert observed["search_provider"] == "lens"
+    assert observed["bluesky_actor"] is None
 
 
 def test_anchor_cli_requires_a_reviewed_discovery_before_pipeline(
@@ -176,9 +227,13 @@ def test_anchor_cli_replays_reviewed_image_and_search_policy(tmp_path: Path, mon
     sealed.parent.mkdir(parents=True)
     sealed.write_bytes(b"sealed-reviewed-input")
     settings = SimpleNamespace(output_dir=tmp_path / "evidence")
+    reviewed_identity = object()
     reviewed = SimpleNamespace(
         image_path=sealed,
         search_mode="deep",
+        search_provider="lens",
+        bluesky_actor=None,
+        threshold=0.417,
         platforms=frozenset({"x"}),
         max_candidates=7,
         max_profile_candidates=0,
@@ -186,6 +241,9 @@ def test_anchor_cli_replays_reviewed_image_and_search_policy(tmp_path: Path, mon
         profile_platforms=None,
         manifest_sha256="0x" + "11" * 32,
         commitment="0x" + "22" * 32,
+        input_sha256=hashlib.sha256(b"sealed-reviewed-input").hexdigest(),
+        input_bytes=b"sealed-reviewed-input",
+        content_identity=reviewed_identity,
     )
     run_dir = tmp_path / "anchored"
     run_dir.mkdir()
@@ -236,10 +294,16 @@ def test_anchor_cli_replays_reviewed_image_and_search_policy(tmp_path: Path, mon
     assert result.exit_code == 0, result.output
     assert observed["image_path"] == sealed
     assert observed["search_mode"] == "deep"
+    assert observed["search_provider"] == "lens"
+    assert observed["bluesky_actor"] is None
+    assert observed["threshold"] == 0.417
     assert observed["platforms"] == frozenset({"x"})
     assert observed["max_candidates"] == 7
     assert observed["review_manifest_sha256"] == "0x" + "11" * 32
     assert observed["review_commitment"] == "0x" + "22" * 32
+    assert observed["review_input_sha256"] == hashlib.sha256(b"sealed-reviewed-input").hexdigest()
+    assert observed["review_input_bytes"] == b"sealed-reviewed-input"
+    assert observed["reviewed_content_identity"] is reviewed_identity
 
 
 def test_provider_display_text_is_safe_for_legacy_windows_encoding() -> None:

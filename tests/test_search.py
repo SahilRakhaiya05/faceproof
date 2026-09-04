@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gzip
 import io
+import struct
 from pathlib import Path
 
 import httpx
@@ -91,6 +93,85 @@ def test_social_filter_deduplicates_and_rejects_open_web() -> None:
     assert is_social_post_url("https://bsky.app/profile/example.test/post/3abc")
 
 
+def test_social_filter_preserves_all_cid_bound_images_but_limits_unique_posts() -> None:
+    first_post = "https://bsky.app/profile/did:plc:alice/post/3first"
+    second_post = "https://bsky.app/profile/did:plc:alice/post/3second"
+    candidates = [
+        SearchCandidate(
+            "bluesky-public-api",
+            1,
+            first_post,
+            first_post,
+            provider_item_id="at://did:plc:alice/app.bsky.feed.post/3first|postcid|image-one",
+        ),
+        SearchCandidate(
+            "bluesky-public-api",
+            2,
+            first_post,
+            first_post,
+            provider_item_id="at://did:plc:alice/app.bsky.feed.post/3first|postcid|image-two",
+        ),
+        SearchCandidate(
+            "bluesky-public-api",
+            3,
+            second_post,
+            second_post,
+            provider_item_id="at://did:plc:alice/app.bsky.feed.post/3second|postcid|image-three",
+        ),
+    ]
+
+    filtered = filter_social_candidates(candidates, limit=1)
+
+    assert [item.rank for item in filtered] == [1, 2]
+    assert len({item.normalized_url for item in filtered}) == 1
+
+
+def test_social_filter_preserves_lens_media_variants_but_limits_unique_posts() -> None:
+    first_post = "https://x.com/volunteer/status/1"
+    second_post = "https://x.com/volunteer/status/2"
+    candidates = [
+        SearchCandidate(
+            "serpapi",
+            1,
+            first_post,
+            first_post,
+            image_url="https://images.example/exact.jpg",
+            provider_item_id="lens:exact:1",
+        ),
+        SearchCandidate(
+            "serpapi",
+            2,
+            first_post,
+            first_post,
+            thumbnail_url="https://images.example/visual.jpg",
+            provider_item_id="lens:visual:1",
+        ),
+        SearchCandidate(
+            "serpapi",
+            3,
+            second_post,
+            second_post,
+            image_url="https://images.example/second.jpg",
+            provider_item_id="lens:visual:2",
+        ),
+    ]
+
+    filtered = filter_social_candidates(candidates, limit=1)
+
+    assert [item.rank for item in filtered] == [1, 2]
+    assert {item.normalized_url for item in filtered} == {first_post}
+
+
+def test_social_filter_does_not_preserve_unbound_duplicate_post_results() -> None:
+    post = "https://bsky.app/profile/did:plc:alice/post/3first"
+    candidates = [
+        SearchCandidate("serpapi", 1, post, post, provider_item_id="lens:one"),
+        SearchCandidate("serpapi", 2, post, post, provider_item_id="lens:two"),
+    ]
+
+    assert [item.rank for item in filter_social_candidates(candidates)] == [1]
+
+
 def test_social_filter_rejects_profiles_and_homepages() -> None:
     candidates = [
         SearchCandidate("test", 1, "https://x.com/person", "https://x.com/person"),
@@ -103,6 +184,20 @@ def test_social_filter_rejects_profiles_and_homepages() -> None:
         ),
     ]
     assert [item.rank for item in filter_social_candidates(candidates)] == [3]
+
+
+def test_short_youtube_urls_are_eligible_social_posts() -> None:
+    candidate = SearchCandidate(
+        "test",
+        1,
+        "https://youtu.be/abc123?t=4",
+        "https://youtu.be/abc123?t=4",
+    )
+
+    assert is_social_url(candidate.normalized_url)
+    assert is_social_post_url(candidate.normalized_url)
+    assert extract_post_id(candidate.normalized_url) == "abc123"
+    assert [item.post_id for item in filter_social_candidates([candidate])] == ["abc123"]
 
 
 def test_linkedin_profiles_are_leads_and_never_post_candidates() -> None:
@@ -189,13 +284,114 @@ def test_serpapi_upload_and_live_lens_search(tmp_path: Path) -> None:
 
     assert run.search_id == "lens-1"
     assert run.live is True
+    assert len(run.candidates) == 2
     assert run.candidates[0].exact_match is True
     assert run.candidates[0].post_id == "99"
+    assert run.candidates[0].image_url == "https://images.example/full.jpg"
+    assert run.candidates[0].thumbnail_url is None
+    assert run.candidates[1].image_url is None
+    assert run.candidates[1].thumbnail_url == "https://images.example/thumb.jpg"
     assert run.web_labels == ("Volunteer Example", "Demo portrait")
     assert "api_key" not in run.raw_response["request_parameters"]
     assert run.raw_response["search"]["search_parameters"]["api_key"] == "[REDACTED]"
     assert "raw_http_bodies" not in run.raw_response
     assert len(run.raw_response["raw_http_body_sha256"]["search"]) == 64
+
+
+def test_serpapi_json_transport_rejects_compressed_response_without_decoding() -> None:
+    compressed = gzip.compress(b'{"account_status":"Active"}' * 10_000)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(
+            200,
+            stream=httpx.ByteStream(compressed),
+            headers={
+                "content-type": "application/json",
+                "content-encoding": "gzip",
+            },
+        )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(SearchError, match="encoded response body"),
+    ):
+        check_serpapi_account("secret", client=client)
+
+
+def test_serpapi_json_transport_enforces_cumulative_deadline_on_raw_trickle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TrickleStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b'{"account_status"'
+            yield b':"Active"}'
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=TrickleStream(),
+            headers={"content-type": "application/json"},
+        )
+
+    clock = iter([0.0, 0.1, 0.7])
+    monkeypatch.setattr("faceproof.search._http.time.monotonic", lambda: next(clock))
+    with (
+        httpx.Client(
+            transport=httpx.MockTransport(handler),
+            timeout=httpx.Timeout(0.5),
+        ) as client,
+        pytest.raises(SearchError, match="total read deadline"),
+    ):
+        check_serpapi_account("secret", client=client)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"value":1e10000}',
+        b'{"value":"\\ud800"}',
+        b'{"value":' + b"[" * 70 + b"0" + b"]" * 70 + b"}",
+    ],
+)
+def test_serpapi_json_transport_rejects_unsafe_json_values(payload: bytes) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=httpx.ByteStream(payload),
+            headers={"content-type": "application/json"},
+        )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(SearchError, match="invalid JSON"),
+    ):
+        check_serpapi_account("secret", client=client)
+
+
+def test_serpapi_upload_preparation_rejects_decompression_bomb(tmp_path: Path) -> None:
+    path = tmp_path / "bomb.bmp"
+    path.write_bytes(
+        b"BM"
+        + struct.pack("<IHHI", 54, 0, 0, 54)
+        + struct.pack(
+            "<IiiHHIIiiII",
+            40,
+            100_000,
+            100_000,
+            1,
+            24,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    )
+
+    with pytest.raises(SearchError, match="Cannot prepare image"):
+        prepare_serpapi_upload(path)
 
 
 def test_serpapi_deep_mode_queries_exact_and_visual_then_deduplicates(tmp_path: Path) -> None:
@@ -255,6 +451,511 @@ def test_serpapi_deep_mode_queries_exact_and_visual_then_deduplicates(tmp_path: 
     assert run.candidates[0].exact_match is True
     assert run.candidates[0].result_type == "exact_match"
     assert run.candidates[1].result_type == "visual_match"
+
+
+def test_serpapi_deep_routes_full_and_focus_images_to_separate_lanes(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "full.jpg"
+    focus_path = tmp_path / "face-crop.jpg"
+    _write_jpeg(image_path, size=(96, 64))
+    Image.new("RGB", (48, 48), color=(180, 40, 20)).save(
+        focus_path,
+        format="JPEG",
+        quality=90,
+    )
+    upload_bodies: list[bytes] = []
+    lens_requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/image":
+            upload_bodies.append(request.content)
+            return httpx.Response(
+                200,
+                json={"image_id": f"image-{len(upload_bodies)}"},
+            )
+        search_type = request.url.params["type"]
+        image_id = request.url.params["image_id"]
+        lens_requests.append((search_type, image_id))
+        return httpx.Response(
+            200,
+            json={
+                "search_metadata": {"id": f"lens-{search_type}", "status": "Success"},
+                "search_parameters": {
+                    "engine": "google_lens",
+                    "image_id": image_id,
+                    "type": search_type,
+                    "no_cache": "true",
+                },
+            },
+        )
+
+    provider = SerpApiLensProvider(
+        "secret",
+        search_mode="deep",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    run = provider.search(image_path, focus_image_path=focus_path)
+
+    assert len(upload_bodies) == 2
+    assert upload_bodies[0] != upload_bodies[1]
+    assert lens_requests == [
+        ("exact_matches", "image-1"),
+        ("visual_matches", "image-2"),
+    ]
+    assert run.raw_response["lane_to_input"] == {
+        "exact_matches": {
+            "input_role": "primary",
+            "image_id": "image-1",
+            "query_upload_sha256": run.raw_response["query_uploads"]["primary"]["sha256"],
+        },
+        "visual_matches": {
+            "input_role": "focus",
+            "image_id": "image-2",
+            "query_upload_sha256": run.raw_response["query_uploads"]["focus"]["sha256"],
+        },
+    }
+    primary_evidence = run.raw_response["query_uploads"]["primary"]
+    focus_evidence = run.raw_response["query_uploads"]["focus"]
+    assert primary_evidence["byte_size"] > 0
+    assert focus_evidence["byte_size"] > 0
+    assert len(primary_evidence["sha256"]) == 64
+    assert len(focus_evidence["sha256"]) == 64
+    assert primary_evidence["sha256"] != focus_evidence["sha256"]
+    assert focus_evidence["provider_upload_reused"] is False
+    assert run.raw_response["uploads"]["focus"]["reused_from"] is None
+    assert len(run.raw_response["raw_http_body_sha256"]["uploads"]["focus"]) == 64
+    assert len(run.raw_response["requests"]) == 2
+    assert all("api_key" not in request for request in run.raw_response["requests"])
+
+
+def test_serpapi_deep_reuses_provider_upload_for_identical_focus_content(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "full.jpg"
+    focus_path = tmp_path / "same-face-different-name.jpg"
+    _write_jpeg(image_path)
+    focus_path.write_bytes(image_path.read_bytes())
+    upload_count = 0
+    lens_image_ids: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal upload_count
+        if request.url.path == "/image":
+            upload_count += 1
+            return httpx.Response(200, json={"image_id": "shared-image"})
+        image_id = request.url.params["image_id"]
+        lens_image_ids.append(image_id)
+        return httpx.Response(
+            200,
+            json={
+                "search_metadata": {
+                    "id": f"lens-{request.url.params['type']}",
+                    "status": "Success",
+                },
+                "search_parameters": {
+                    "engine": "google_lens",
+                    "image_id": image_id,
+                    "type": request.url.params["type"],
+                    "no_cache": "true",
+                },
+            },
+        )
+
+    provider = SerpApiLensProvider(
+        "secret",
+        search_mode="deep",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    run = provider.search(image_path, focus_image_path=focus_path)
+
+    assert upload_count == 1
+    assert lens_image_ids == ["shared-image", "shared-image"]
+    assert run.raw_response["query_uploads"]["focus"]["provider_upload_reused"] is True
+    assert run.raw_response["query_uploads"]["focus"]["provider_upload_reused_from"] == ("primary")
+    assert run.raw_response["uploads"]["focus"]["reused_from"] == "primary"
+    assert run.raw_response["lane_to_input"]["visual_matches"]["input_role"] == "focus"
+    assert (
+        run.raw_response["query_uploads"]["primary"]["sha256"]
+        == (run.raw_response["query_uploads"]["focus"]["sha256"])
+    )
+
+
+def test_serpapi_standard_ignores_optional_focus_and_keeps_one_search(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "full.jpg"
+    focus_path = tmp_path / "unused-focus.jpg"
+    _write_jpeg(image_path)
+    Image.new("RGB", (48, 48), color=(220, 30, 80)).save(focus_path, format="JPEG")
+    requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.url.path == "/image":
+            return httpx.Response(200, json={"image_id": "standard-image"})
+        assert request.url.params["image_id"] == "standard-image"
+        assert request.url.params["type"] == "all"
+        return httpx.Response(
+            200,
+            json={
+                "search_metadata": {"id": "lens-all", "status": "Success"},
+                "search_parameters": {
+                    "engine": "google_lens",
+                    "image_id": "standard-image",
+                    "type": "all",
+                    "no_cache": "true",
+                },
+            },
+        )
+
+    provider = SerpApiLensProvider(
+        "secret",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    run = provider.search(image_path, focus_image_path=focus_path)
+
+    assert requests == [("POST", "/image"), ("GET", "/search.json")]
+    assert set(run.raw_response["query_uploads"]) == {"primary"}
+    assert run.raw_response["lane_to_input"]["all"]["input_role"] == "primary"
+    assert run.raw_response["search_mode"] == "standard"
+
+
+def test_serpapi_deep_validates_focus_before_any_provider_upload(tmp_path: Path) -> None:
+    image_path = tmp_path / "full.jpg"
+    _write_jpeg(image_path)
+    provider_requests = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal provider_requests
+        provider_requests += 1
+        return httpx.Response(500)
+
+    provider = SerpApiLensProvider(
+        "secret",
+        search_mode="deep",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(SearchError, match="Focus image does not exist"):
+        provider.search(image_path, focus_image_path=tmp_path / "missing-focus.jpg")
+
+    assert provider_requests == 0
+
+
+def test_serpapi_standard_soft_empty_returns_preserved_zero_candidate_run(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "input.jpg"
+    _write_jpeg(image_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/image":
+            return httpx.Response(200, json={"image_id": "image-empty"})
+        assert request.url.params["type"] == "all"
+        return httpx.Response(
+            200,
+            json={
+                "search_metadata": {"id": "lens-empty", "status": "Error"},
+                "search_parameters": {
+                    "engine": "google_lens",
+                    "image_id": "image-empty",
+                    "type": "all",
+                    "no_cache": "true",
+                },
+                "error": "Google Lens hasn't returned any results for this query.",
+            },
+        )
+
+    provider = SerpApiLensProvider(
+        "secret", client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    run = provider.search(image_path)
+
+    assert run.search_id == "lens-empty"
+    assert run.search_ids == ("lens-empty",)
+    assert run.search_types == ("all",)
+    assert run.candidates == ()
+    assert run.raw_response["search_outcomes"]["all"] == {
+        "outcome": "soft-empty",
+        "provider_error": "Google Lens hasn't returned any results for this query.",
+    }
+    assert run.raw_response["search"]["search_metadata"]["id"] == "lens-empty"
+
+
+def test_serpapi_soft_empty_ignores_contradictory_candidates_and_labels(tmp_path: Path) -> None:
+    image_path = tmp_path / "input.jpg"
+    _write_jpeg(image_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/image":
+            return httpx.Response(200, json={"image_id": "image-empty"})
+        return httpx.Response(
+            200,
+            json={
+                "search_metadata": {"id": "lens-empty", "status": "Error"},
+                "search_parameters": {
+                    "engine": "google_lens",
+                    "image_id": "image-empty",
+                    "type": "all",
+                    "no_cache": "true",
+                },
+                "error": "Google Lens hasn't returned any results for this query.",
+                "knowledge_graph": {"title": "Must not be trusted"},
+                "visual_matches": [
+                    {
+                        "position": 1,
+                        "link": "https://x.com/should-not-pass/status/123",
+                    }
+                ],
+            },
+        )
+
+    provider = SerpApiLensProvider(
+        "secret", client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    run = provider.search(image_path)
+
+    assert run.candidates == ()
+    assert run.web_labels == ()
+    assert run.raw_response["search"]["visual_matches"]
+
+
+def test_serpapi_deep_exact_soft_empty_continues_to_visual_results(tmp_path: Path) -> None:
+    image_path = tmp_path / "input.jpg"
+    _write_jpeg(image_path)
+    requested_types: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/image":
+            return httpx.Response(200, json={"image_id": "image-deep"})
+        search_type = request.url.params["type"]
+        requested_types.append(search_type)
+        common = {
+            "search_metadata": {"id": f"lens-{search_type}", "status": "Success"},
+            "search_parameters": {
+                "engine": "google_lens",
+                "image_id": "image-deep",
+                "type": search_type,
+                "no_cache": "true",
+            },
+        }
+        if search_type == "exact_matches":
+            common["search_metadata"]["status"] = "Error"
+            common["error"] = "Google Lens hasn't returned any results for this query."
+        else:
+            common["visual_matches"] = [
+                {
+                    "position": 1,
+                    "link": "https://x.com/volunteer/status/123",
+                    "title": "Visual result",
+                }
+            ]
+        return httpx.Response(200, json=common)
+
+    provider = SerpApiLensProvider(
+        "secret",
+        search_mode="deep",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    run = provider.search(image_path)
+
+    assert requested_types == ["exact_matches", "visual_matches"]
+    assert [item.normalized_url for item in run.candidates] == [
+        "https://x.com/volunteer/status/123"
+    ]
+    assert run.raw_response["search_outcomes"]["exact_matches"]["outcome"] == "soft-empty"
+    assert run.raw_response["search_outcomes"]["visual_matches"]["outcome"] == "success"
+
+
+def test_serpapi_deep_visual_soft_empty_keeps_exact_results(tmp_path: Path) -> None:
+    image_path = tmp_path / "input.jpg"
+    _write_jpeg(image_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/image":
+            return httpx.Response(200, json={"image_id": "image-deep"})
+        search_type = request.url.params["type"]
+        common = {
+            "search_metadata": {"id": f"lens-{search_type}", "status": "Success"},
+            "search_parameters": {
+                "engine": "google_lens",
+                "image_id": "image-deep",
+                "type": search_type,
+                "no_cache": "true",
+            },
+        }
+        if search_type == "exact_matches":
+            common["exact_matches"] = [
+                {
+                    "position": 1,
+                    "link": "https://reddit.com/r/pics/comments/abc/consented-post",
+                    "title": "Exact result",
+                }
+            ]
+        else:
+            common["search_metadata"]["status"] = "Error"
+            common["error"] = "Google Lens has not returned any results for this query"
+        return httpx.Response(200, json=common)
+
+    provider = SerpApiLensProvider(
+        "secret",
+        search_mode="deep",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    run = provider.search(image_path)
+
+    assert len(run.candidates) == 1
+    assert run.candidates[0].result_type == "exact_match"
+    assert run.candidates[0].exact_match is True
+    assert run.raw_response["search_outcomes"]["visual_matches"]["outcome"] == "soft-empty"
+
+
+def test_serpapi_all_parses_exact_before_visual_and_deduplicates(tmp_path: Path) -> None:
+    image_path = tmp_path / "input.jpg"
+    _write_jpeg(image_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/image":
+            return httpx.Response(200, json={"image_id": "image-all"})
+        return httpx.Response(
+            200,
+            json={
+                "search_metadata": {"id": "lens-all", "status": "Success"},
+                "search_parameters": {
+                    "engine": "google_lens",
+                    "image_id": "image-all",
+                    "type": "all",
+                    "no_cache": "true",
+                },
+                "exact_matches": [
+                    {
+                        "position": 8,
+                        "link": "https://x.com/volunteer/status/123",
+                        "title": "Exact copy",
+                    }
+                ],
+                "visual_matches": [
+                    {
+                        "position": 1,
+                        "link": "https://x.com/volunteer/status/123",
+                        "title": "Duplicate visual copy",
+                    },
+                    {
+                        "position": 2,
+                        "link": "https://youtu.be/video456",
+                        "title": "Another visual result",
+                    },
+                ],
+            },
+        )
+
+    provider = SerpApiLensProvider(
+        "secret", client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    run = provider.search(image_path)
+
+    assert [item.result_type for item in run.candidates] == ["exact_match", "visual_match"]
+    assert [item.rank for item in run.candidates] == [1, 2]
+    assert run.candidates[0].title == "Exact copy"
+    assert run.candidates[1].post_id == "video456"
+
+
+def test_serpapi_all_retains_distinct_media_variants_for_the_same_post(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "input.jpg"
+    _write_jpeg(image_path)
+    post = "https://x.com/volunteer/status/123"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/image":
+            return httpx.Response(200, json={"image_id": "image-all"})
+        return httpx.Response(
+            200,
+            json={
+                "search_metadata": {"id": "lens-all", "status": "Success"},
+                "search_parameters": {
+                    "engine": "google_lens",
+                    "image_id": "image-all",
+                    "type": "all",
+                    "no_cache": "true",
+                },
+                "exact_matches": [
+                    {
+                        "position": 1,
+                        "link": post,
+                        "image": "https://images.example/exact.jpg",
+                    }
+                ],
+                "visual_matches": [
+                    {
+                        "position": 2,
+                        "link": post,
+                        "image": "https://images.example/exact.jpg",
+                    },
+                    {
+                        "position": 3,
+                        "link": post,
+                        "thumbnail": "https://images.example/face-bearing-visual.jpg",
+                    },
+                ],
+            },
+        )
+
+    provider = SerpApiLensProvider(
+        "secret",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    run = provider.search(image_path)
+
+    assert [item.result_type for item in run.candidates] == ["exact_match", "visual_match"]
+    assert run.candidates[0].exact_match is True
+    assert run.candidates[1].thumbnail_url == ("https://images.example/face-bearing-visual.jpg")
+    assert run.candidates[0].provider_item_id != run.candidates[1].provider_item_id
+
+
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        "Invalid API key.",
+        "Your account has run out of searches.",
+    ],
+)
+def test_serpapi_deep_hard_provider_errors_still_fail_closed(
+    tmp_path: Path, provider_error: str
+) -> None:
+    image_path = tmp_path / "input.jpg"
+    _write_jpeg(image_path)
+    requested_types: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/image":
+            return httpx.Response(200, json={"image_id": "image-deep"})
+        requested_types.append(request.url.params["type"])
+        return httpx.Response(
+            200,
+            json={
+                "search_metadata": {"id": "lens-error", "status": "Error"},
+                "search_parameters": {
+                    "engine": "google_lens",
+                    "image_id": "image-deep",
+                    "type": request.url.params["type"],
+                    "no_cache": "true",
+                },
+                "error": provider_error,
+            },
+        )
+
+    provider = SerpApiLensProvider(
+        "secret",
+        search_mode="deep",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(SearchError, match="SerpApi Lens error"):
+        provider.search(image_path)
+
+    assert requested_types == ["exact_matches"]
 
 
 def test_serpapi_rejects_non_success_search_status(tmp_path: Path) -> None:

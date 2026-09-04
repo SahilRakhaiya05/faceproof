@@ -28,8 +28,8 @@ capture time and makes that trust boundary explicit.
    transaction input/sender/target/value, canonical block, target-address
    event, saved receipt, and current contract state are cross-checked.
 6. **Reviewer to anchor:** an unanchored discovery run may rank candidates, but
-   a write requires the human-approved exact permalink to reappear and pass all
-   checks in a fresh live run.
+   a write requires the human-approved exact permalink and captured content
+   identity to reappear and pass all checks in a fresh live run.
 
 ## Principal threats and controls
 
@@ -40,7 +40,11 @@ capture time and makes that trust boundary explicit.
 | Profile or login page presented as a post | Platform-specific permalink/ID validation, redirect and metadata identity checks, successful public capture required before anchoring | X oEmbed can confirm post identity without exposing the original media bytes |
 | Provider thumbnail misattributed to a URL | Captured post media is downloaded and independently re-matched when available; weaker provider-associated linkage is labelled | Some platform APIs do not expose media without privileged access |
 | Evidence changed after discovery | SHA-256 every artifact, RFC 8785 manifest, salted Keccak commitment, immutable contract entry | Malicious bytes prepared before anchoring remain malicious but unchanged |
-| Private-network fetch/SSRF or transport downgrade | HTTPS-only remote-evidence checks, credential rejection, DNS address checks, redirect revalidation and response-size limits | DNS rebinding cannot be completely eliminated without a controlled egress proxy |
+| Post edited at the approved permalink | Approval binds reviewed candidate/captured-media hashes and stable capture metadata; Bluesky additionally binds AT URI, post CID and image CID; the fresh pass compares exact typed identities before broadcasting | Benign provider transformations may force a new review; supported capture metadata is not a platform signature |
+| Private-network fetch/SSRF or transport downgrade | HTTPS-only capture, credential rejection, public-address DNS validation pinned to the actual TCP peer, redirect revalidation, identity-only encoding, cumulative read deadlines, and response-size limits | In-process deadlines can overshoot one socket-read interval; production still benefits from a controlled egress proxy/process boundary |
+| Local-browser DNS rebinding or cross-site request | Loopback-only Host validation plus Origin and Fetch-Metadata checks on mutations | A compromised same-origin browser session or local host remains trusted |
+| Reviewed input replaced before anchoring | The verified discovery manifest's exact input SHA-256 is carried into the fresh pass and the copied bytes are rechecked | A trusted local operator can bypass high-level workflow policy by invoking internals directly |
+| Local evidence replaced between verification and use | Review authorization, content-to-manifest binding, ZIP export, and public receipts operate on immutable snapshots; the anchor pass checks selected/captured artifact hashes against the completed manifest before broadcast | A hostile process with full control of the host can still deny service or corrupt stored evidence after the transaction |
 | API or wallet secret disclosure | Environment-only configuration, `.env` ignored, secrets never included in evidence or console output | Screen-recording or host compromise can still leak secrets |
 | Public biometric/PII leakage | Raw evidence remains local; only an opaque salted commitment is on-chain; embeddings are not persisted | Sharing the evidence directory or salt may reveal personal data |
 | Blockchain/network confusion | Expected chain ID, exact trusted contract address, required runtime-code hash, and trusted confirmation depth checked before writes and reads; bundle claims are not trust inputs | Public testnets and RPC services can be unavailable, reorganize, or be retired |

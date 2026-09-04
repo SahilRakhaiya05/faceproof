@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "faceproof"
-version = "0.3.0"
+version = "0.4.0"
 description = "Consent-first face-to-web discovery with tamper-evident blockchain verification."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,7 +13,10 @@ authors = [{ name = "HH Goa 2026 Task 3 Team" }]
 dependencies = [
   "eth-abi>=5.2,<6",
   "fastapi>=0.116,<1",
-  "httpx>=0.28,<1",
+  # capture.py's DNS-pinned transport deliberately uses httpcore's backend
+  # boundary. Keep this tested pair exact until that boundary is upgraded.
+  "httpcore==1.0.9",
+  "httpx==0.28.1",
   "jsonschema>=4.25,<5",
   "numpy>=2.0,<3",
   "opencv-python-headless>=4.11,<5",

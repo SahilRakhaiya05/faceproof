@@ -158,7 +158,7 @@ def test_deploy_anchor_fresh_verify_and_tamper_rejection(tmp_path: Path) -> None
         assert runtime_code
         expected_code_hash = bytes(Web3.keccak(runtime_code))
 
-        run_dir = tmp_path / "evidence-run"
+        run_dir = tmp_path / "local-evm-integration"
         artifact = run_dir / "search" / "provider-response.json"
         artifact.parent.mkdir(parents=True)
         artifact.write_bytes(b'{"provider":"synthetic-local-integration"}\n')

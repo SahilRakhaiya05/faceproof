@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import math
+import struct
 import sys
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from faceproof.face import (  # noqa: E402
     BoundingBox,
     FaceDependencyError,
     FaceDetection,
+    FaceInputError,
     FaceModelError,
     FaceQualityError,
     InvalidEmbeddingError,
@@ -76,6 +78,32 @@ def test_parse_none_and_multiple_rows() -> None:
     assert parse_yunet_detections(None) == ()
     rows = [yunet_row(x=10), yunet_row(x=220)]
     assert len(parse_yunet_detections(rows)) == 2
+
+
+def test_backend_rejects_decompression_bomb_before_loading_opencv(tmp_path: Path) -> None:
+    bomb = tmp_path / "bomb.bmp"
+    bomb.write_bytes(
+        b"BM"
+        + struct.pack("<IHHI", 54, 0, 0, 54)
+        + struct.pack(
+            "<IiiHHIIiiII",
+            40,
+            100_000,
+            100_000,
+            1,
+            24,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    )
+    backend = OpenCVFaceBackend(tmp_path / "missing-yunet.onnx", tmp_path / "missing-sface.onnx")
+
+    with pytest.raises(FaceInputError, match="decoded pixels|safe, decodable"):
+        backend.encode_one(bomb)
 
 
 def test_invalid_yunet_row_is_rejected() -> None:

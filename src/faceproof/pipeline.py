@@ -46,7 +46,9 @@ from .face import (
     DEFAULT_COSINE_THRESHOLD,
     FaceEncoding,
     FaceError,
+    FaceQualityError,
     OpenCVFaceBackend,
+    QualityPolicy,
     cosine_similarity,
 )
 from .model_assets import verify_default_models
@@ -54,16 +56,19 @@ from .provenance import ProvenanceError, verify_git_source_revision
 from .search import (
     PROFILE_LEAD_PLATFORMS,
     SUPPORTED_PLATFORMS,
+    BlueskyAuthorFeedProvider,
+    BlueskyEvidenceRef,
     SearchCandidate,
     SearchError,
     SearchRun,
     SerpApiLensProvider,
     filter_profile_candidates,
     filter_social_candidates,
+    normalize_bluesky_actor,
     normalize_page_url,
     platform_name,
 )
-from .search.base import redact_url_secrets
+from .search.base import extract_post_id, redact_url_secrets
 
 
 class PipelineError(RuntimeError):
@@ -92,6 +97,127 @@ class CandidateEvaluation:
     @property
     def local_similarity_micros(self) -> int:
         return round(self.local_similarity * 1_000_000)
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewedContentIdentity:
+    """Immutable identity of the exact post content a human reviewed."""
+
+    search_provider: str
+    normalized_url: str
+    post_id: str
+    candidate_media_sha256: str
+    capture_method: str
+    capture_content_sha256: str
+    capture_media_sha256: tuple[str, ...]
+    bluesky_at_uri: str | None = None
+    bluesky_post_cid: str | None = None
+    bluesky_image_cid: str | None = None
+
+    @classmethod
+    def from_dict(cls, value: object) -> ReviewedContentIdentity:
+        if not isinstance(value, dict):
+            raise PipelineError("Reviewed content identity must be an object")
+        expected_fields = {
+            "schema",
+            "search_provider",
+            "normalized_url",
+            "post_id",
+            "candidate_media_sha256",
+            "capture_method",
+            "capture_content_sha256",
+            "capture_media_sha256",
+            "bluesky_at_uri",
+            "bluesky_post_cid",
+            "bluesky_image_cid",
+        }
+        if set(value) != expected_fields or value.get("schema") != "faceproof-content/v1":
+            raise PipelineError("Reviewed content identity has an unsupported schema")
+        provider = value.get("search_provider")
+        normalized_url = value.get("normalized_url")
+        post_id = value.get("post_id")
+        capture_method = value.get("capture_method")
+        if provider not in {"lens", "bluesky"}:
+            raise PipelineError("Reviewed content identity has an invalid provider")
+        if not isinstance(normalized_url, str):
+            raise PipelineError("Reviewed content identity has an invalid permalink")
+        try:
+            canonical_url = normalize_page_url(normalized_url)
+        except ValueError as exc:
+            raise PipelineError("Reviewed content identity has an invalid permalink") from exc
+        if canonical_url != normalized_url:
+            raise PipelineError("Reviewed content identity permalink is not canonical")
+        if (
+            not isinstance(post_id, str)
+            or not post_id
+            or post_id != extract_post_id(normalized_url)
+        ):
+            raise PipelineError("Reviewed content identity has an invalid post ID")
+        if not isinstance(capture_method, str) or not capture_method:
+            raise PipelineError("Reviewed content identity has an invalid capture method")
+        candidate_hash = _sha256_hex(value.get("candidate_media_sha256"), "candidate media hash")
+        capture_content_hash = _sha256_hex(
+            value.get("capture_content_sha256"), "capture content hash"
+        )
+        capture_media_value = value.get("capture_media_sha256")
+        if not isinstance(capture_media_value, list):
+            raise PipelineError("Reviewed content identity capture media hashes are invalid")
+        capture_media = tuple(
+            _sha256_hex(item, "capture media hash") for item in capture_media_value
+        )
+        if tuple(sorted(set(capture_media))) != capture_media:
+            raise PipelineError(
+                "Reviewed content identity capture media hashes must be unique and sorted"
+            )
+
+        bluesky_values = (
+            value.get("bluesky_at_uri"),
+            value.get("bluesky_post_cid"),
+            value.get("bluesky_image_cid"),
+        )
+        if provider == "bluesky":
+            if not all(isinstance(item, str) and item for item in bluesky_values):
+                raise PipelineError("Reviewed Bluesky content identity is incomplete")
+            try:
+                ref = BlueskyEvidenceRef.parse("|".join(bluesky_values))
+            except ValueError as exc:
+                raise PipelineError("Reviewed Bluesky content identity is invalid") from exc
+            if post_id != f"{ref.did}/{ref.rkey}":
+                raise PipelineError("Reviewed Bluesky identity does not match the permalink")
+        elif any(item is not None for item in bluesky_values):
+            raise PipelineError("Lens content identity cannot contain Bluesky identifiers")
+
+        return cls(
+            search_provider=provider,
+            normalized_url=normalized_url,
+            post_id=post_id,
+            candidate_media_sha256=candidate_hash,
+            capture_method=capture_method,
+            capture_content_sha256=capture_content_hash,
+            capture_media_sha256=capture_media,
+            bluesky_at_uri=bluesky_values[0],
+            bluesky_post_cid=bluesky_values[1],
+            bluesky_image_cid=bluesky_values[2],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": "faceproof-content/v1",
+            "search_provider": self.search_provider,
+            "normalized_url": self.normalized_url,
+            "post_id": self.post_id,
+            "candidate_media_sha256": self.candidate_media_sha256,
+            "capture_method": self.capture_method,
+            "capture_content_sha256": self.capture_content_sha256,
+            "capture_media_sha256": list(self.capture_media_sha256),
+            "bluesky_at_uri": self.bluesky_at_uri,
+            "bluesky_post_cid": self.bluesky_post_cid,
+            "bluesky_image_cid": self.bluesky_image_cid,
+        }
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(_canonical_json(self.to_dict())).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,11 +285,16 @@ def run_pipeline(
     profile_discovery_authorized: bool = False,
     profile_platforms: frozenset[str] | None = None,
     search_mode: str = "standard",
+    search_provider: str = "lens",
+    bluesky_actor: str | None = None,
     platforms: frozenset[str] | None = None,
     approved_post_url: str | None = None,
     review_run_id: str | None = None,
     review_manifest_sha256: str | None = None,
     review_commitment: str | None = None,
+    review_input_sha256: str | None = None,
+    review_input_bytes: bytes | None = None,
+    reviewed_content_identity: ReviewedContentIdentity | None = None,
     output_dir: Path | None = None,
     on_stage: Callable[[str], None] | None = None,
 ) -> PipelineResult:
@@ -178,6 +309,9 @@ def run_pipeline(
         )
     if not -1 <= threshold <= 1:
         raise PipelineError("Face similarity threshold must be between -1 and 1")
+    # Evidence stores integer millionths. Normalize once before any decision so
+    # discovery and the reviewed anchor pass apply exactly the same threshold.
+    threshold = round(threshold * 1_000_000) / 1_000_000
     if not skip_anchor and threshold < DEFAULT_COSINE_THRESHOLD:
         raise PipelineError(
             f"Anchored runs require a threshold of at least {DEFAULT_COSINE_THRESHOLD:g}"
@@ -190,6 +324,19 @@ def run_pipeline(
         raise PipelineError("Public profile discovery requires an explicit consent acknowledgement")
     if search_mode not in {"standard", "deep"}:
         raise PipelineError("Search mode must be 'standard' or 'deep'")
+    normalized_search_provider = search_provider.strip().casefold()
+    if normalized_search_provider not in {"lens", "bluesky"}:
+        raise PipelineError("Search provider must be 'lens' or 'bluesky'")
+    normalized_bluesky_actor: str | None = None
+    if normalized_search_provider == "bluesky":
+        try:
+            normalized_bluesky_actor = normalize_bluesky_actor(bluesky_actor or "")
+        except ValueError as exc:
+            raise PipelineError(str(exc)) from exc
+        if search_mode != "standard":
+            raise PipelineError("Bluesky author-feed search supports standard mode only")
+        if max_profile_candidates or profile_discovery_authorized:
+            raise PipelineError("Public profile-lead discovery is available only with Lens")
     normalized_platforms = (
         frozenset(item.strip().casefold() for item in platforms if item.strip())
         if platforms is not None
@@ -202,6 +349,10 @@ def run_pipeline(
         raise PipelineError(
             "Unsupported platform filter: " + ", ".join(sorted(unsupported_platforms))
         )
+    if normalized_search_provider == "bluesky":
+        if normalized_platforms is not None and normalized_platforms != frozenset({"bluesky"}):
+            raise PipelineError("Bluesky author-feed search can evaluate only Bluesky posts")
+        normalized_platforms = frozenset({"bluesky"})
     normalized_profile_platforms = (
         frozenset(item.strip().casefold() for item in profile_platforms if item.strip())
         if profile_platforms is not None
@@ -228,6 +379,15 @@ def run_pipeline(
         raise PipelineError("Review run ID is invalid")
     normalized_review_manifest = (review_manifest_sha256 or "").strip() or None
     normalized_review_commitment = (review_commitment or "").strip() or None
+    normalized_review_input = (review_input_sha256 or "").strip().casefold() or None
+    if reviewed_content_identity is not None and not isinstance(
+        reviewed_content_identity, ReviewedContentIdentity
+    ):
+        raise PipelineError("Reviewed content identity is invalid")
+    if reviewed_content_identity is not None:
+        reviewed_content_identity = ReviewedContentIdentity.from_dict(
+            reviewed_content_identity.to_dict()
+        )
     review_values = (normalized_review_manifest, normalized_review_commitment)
     if any(review_values) and not all(review_values):
         raise PipelineError("Review evidence requires both manifest hash and commitment")
@@ -237,6 +397,12 @@ def run_pipeline(
     ):
         if value and not re.fullmatch(r"0x[0-9a-fA-F]{64}", value):
             raise PipelineError(f"{label} must be a bytes32 hexadecimal value")
+    if normalized_review_input and not re.fullmatch(r"[0-9a-f]{64}", normalized_review_input):
+        raise PipelineError("review input hash must be a SHA-256 hexadecimal value")
+    if review_input_bytes is not None and not isinstance(review_input_bytes, bytes):
+        raise PipelineError("review input bytes are invalid")
+    if review_input_bytes is not None and (skip_anchor or not normalized_review_input):
+        raise PipelineError("sealed review input bytes are valid only for an anchor pass")
     if approved_post_url:
         try:
             approved_normalized = normalize_page_url(approved_post_url)
@@ -251,7 +417,8 @@ def run_pipeline(
             "Anchoring requires a non-sensitive --consent-reference for the authorized demo"
         )
     try:
-        settings.require_serpapi_key()
+        if normalized_search_provider == "lens":
+            settings.require_serpapi_key()
         if not skip_anchor:
             settings.require_chain_write()
             if not settings.contract_code_hash:
@@ -263,6 +430,17 @@ def run_pipeline(
         raise PipelineError(str(exc)) from exc
     except ValueError as exc:
         raise PipelineError(str(exc)) from exc
+    if not skip_anchor and (
+        not normalized_review_run_id
+        or not normalized_review_manifest
+        or not normalized_review_commitment
+        or not normalized_review_input
+        or reviewed_content_identity is None
+    ):
+        raise PipelineError(
+            "Anchoring requires a verified discovery run, exact content identity, input hash, "
+            "manifest hash, and commitment"
+        )
 
     model_results = verify_default_models(settings.model_dir)
     invalid_models = [
@@ -274,28 +452,57 @@ def run_pipeline(
         )
 
     source = Path(image_path)
-    if not source.is_file():
-        raise PipelineError(f"Input image does not exist: {source}")
-    if source.stat().st_size > 25 * 1024 * 1024:
+    if review_input_bytes is None:
+        if not source.is_file():
+            raise PipelineError(f"Input image does not exist: {source}")
+        try:
+            with source.open("rb") as source_handle:
+                source_bytes = source_handle.read(25 * 1024 * 1024 + 1)
+        except OSError as exc:
+            raise PipelineError(f"Input image cannot be read: {source}") from exc
+    else:
+        source_bytes = review_input_bytes
+    if len(source_bytes) > 25 * 1024 * 1024:
         raise PipelineError("Input image exceeds the 25MB safety limit")
+    if normalized_review_input and not secrets.compare_digest(
+        hashlib.sha256(source_bytes).hexdigest(),
+        normalized_review_input,
+    ):
+        raise PipelineError("Reviewed input image changed after discovery verification")
 
     run_id = _new_run_id()
     base_output = Path(output_dir or settings.output_dir)
+    base_output.mkdir(parents=True, exist_ok=True)
+    if not skip_anchor:
+        _claim_review_for_anchor(
+            base_output,
+            discovery_run_id=normalized_review_run_id or "",
+            anchor_run_id=run_id,
+            manifest_sha256=normalized_review_manifest or "",
+            commitment=normalized_review_commitment or "",
+            input_sha256=normalized_review_input or "",
+            content_identity_sha256=(
+                reviewed_content_identity.sha256 if reviewed_content_identity else ""
+            ),
+        )
     run_dir = base_output / run_id
-    run_dir.mkdir(parents=True, exist_ok=False)
+    run_dir.mkdir(exist_ok=False)
 
     input_dir = run_dir / "input"
     input_dir.mkdir()
     suffix = source.suffix.lower() if source.suffix else ".img"
     query_path = input_dir / f"query{suffix}"
-    query_path.write_bytes(source.read_bytes())
+    query_path.write_bytes(source_bytes)
 
     _stage(on_stage, "Detecting, quality-checking, and encoding the query face")
     backend = OpenCVFaceBackend(settings.yunet_model, settings.sface_model)
     try:
         query_encoding = backend.encode_one(query_path)
     except FaceError as exc:
-        _write_json(run_dir / "run-error.json", {"stage": "face", "error": str(exc)})
+        _write_json(
+            run_dir / "run-error.json",
+            _face_error_record(exc, quality_policy=backend.quality_policy),
+        )
         raise PipelineError(str(exc)) from exc
     _save_face_preview(query_path, query_encoding, input_dir / "detected-face.jpg")
     _save_face_crop(query_path, query_encoding, input_dir / "face-crop.jpg")
@@ -316,25 +523,45 @@ def run_pipeline(
         },
     )
 
-    # Lens receives the full scan because surrounding visual context materially
-    # improves exact/cropped/repost retrieval. The detected crop and embedding
-    # remain hashed evidence and every returned candidate is rechecked locally.
     search_image_path = query_path
-    search_query_strategy = "full-input-face-scan"
+    search_query_strategy = (
+        (
+            "full-image-exact-plus-face-crop-visual"
+            if search_mode == "deep"
+            else "full-input-face-scan"
+        )
+        if normalized_search_provider == "lens"
+        else "consented-public-author-feed-plus-local-face-rematch"
+    )
 
     provider = _make_provider(
         settings=settings,
         live=live,
         search_mode=search_mode,
+        search_provider=normalized_search_provider,
+        bluesky_actor=normalized_bluesky_actor,
     )
-    _stage(on_stage, "Running genuine live Google Lens search through SerpApi")
+    _stage(
+        on_stage,
+        (
+            "Running genuine live Google Lens search through SerpApi"
+            if normalized_search_provider == "lens"
+            else "Scanning the consented public Bluesky media feed without uploading the query face"
+        ),
+    )
     try:
         with provider:
-            search_run = provider.search(search_image_path)
+            if normalized_search_provider == "lens":
+                search_run = provider.search(
+                    search_image_path,
+                    focus_image_path=input_dir / "face-crop.jpg",
+                )
+            else:
+                search_run = provider.search(search_image_path)
     except (SearchError, OSError) as exc:
         _write_json(run_dir / "run-error.json", {"stage": "search", "error": str(exc)})
         raise PipelineError(f"Search failed: {exc}") from exc
-    if not search_run.live or search_run.provider != "serpapi":
+    if not search_run.live or search_run.provider != provider.name:
         raise PipelineError("Search provider did not return a verifiable live production run")
 
     search_dir = run_dir / "search"
@@ -551,6 +778,27 @@ def run_pipeline(
             run_dir,
         )
 
+    content_identity = _build_reviewed_content_identity(
+        selected=selected,
+        capture=post_capture,
+        search_provider=normalized_search_provider,
+    )
+    if reviewed_content_identity is not None and content_identity != reviewed_content_identity:
+        _write_json(
+            run_dir / "run-error.json",
+            {
+                "stage": "reviewed-content-binding",
+                "error": "The exact reviewed post content changed before anchoring",
+                "approved_post_url": approved_normalized,
+                "expected_content_identity_sha256": reviewed_content_identity.sha256,
+                "observed_content_identity_sha256": content_identity.sha256,
+            },
+        )
+        raise InconclusiveError(
+            "The human-approved post content/version changed; refusing to anchor",
+            run_dir,
+        )
+
     profile_evaluations = _evaluate_profile_leads(
         profile_candidates=profile_candidates,
         run_dir=run_dir,
@@ -565,6 +813,8 @@ def run_pipeline(
         "status": "selected",
         "candidate": selected.candidate.public_dict(),
         "candidate_media": selected.media_artifact.to_dict(),
+        "reviewed_content_identity": content_identity.to_dict(),
+        "reviewed_content_identity_sha256": content_identity.sha256,
         "local_similarity_micros": selected.local_similarity_micros,
         "threshold_micros": round(threshold * 1_000_000),
         "capture_status": post_capture.status,
@@ -579,6 +829,15 @@ def run_pipeline(
             "discovery_run_id": normalized_review_run_id,
             "discovery_manifest_sha256": normalized_review_manifest,
             "discovery_commitment": normalized_review_commitment,
+            "discovery_input_sha256": normalized_review_input,
+            "discovery_content_identity_sha256": (
+                reviewed_content_identity.sha256 if reviewed_content_identity else None
+            ),
+            "content_identity_match": (
+                content_identity == reviewed_content_identity
+                if reviewed_content_identity is not None
+                else None
+            ),
             "recorded_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         },
     }
@@ -599,6 +858,8 @@ def run_pipeline(
         consent_reference=normalized_consent_reference,
         source_revision=settings.source_revision,
         search_mode=search_mode,
+        search_provider=normalized_search_provider,
+        bluesky_actor=normalized_bluesky_actor,
         platforms=normalized_platforms,
         profile_evaluations=profile_evaluations,
         profile_candidate_count=len(profile_candidates),
@@ -607,6 +868,9 @@ def run_pipeline(
         review_run_id=normalized_review_run_id,
         review_manifest_sha256=normalized_review_manifest,
         review_commitment=normalized_review_commitment,
+        review_input_sha256=normalized_review_input,
+        content_identity=content_identity,
+        reviewed_content_identity=reviewed_content_identity,
         max_candidates=max_candidates,
         max_profile_candidates=max_profile_candidates,
     )
@@ -616,6 +880,12 @@ def run_pipeline(
         observed_at=search_run.retrieved_at,
         metadata=metadata,
         media_types=media_types,
+    )
+    _validate_manifest_content_artifacts(
+        manifest,
+        run_dir=run_dir,
+        selected=selected,
+        capture=post_capture,
     )
     canonical = canonical_manifest_bytes(manifest)
     commitment_record = compute_commitment(manifest)
@@ -703,6 +973,62 @@ def anchor_submission_path(run_dir: Path) -> Path:
     return resolved.parent / f".{resolved.name}.anchor-submission.json"
 
 
+def review_anchor_claim_path(output_dir: Path, discovery_run_id: str) -> Path:
+    """Return the single-use claim that prevents duplicate anchor attempts."""
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", discovery_run_id):
+        raise PipelineError("Review run ID is invalid")
+    return Path(output_dir).resolve() / f".{discovery_run_id}.anchor-claim.json"
+
+
+def _claim_review_for_anchor(
+    output_dir: Path,
+    *,
+    discovery_run_id: str,
+    anchor_run_id: str,
+    manifest_sha256: str,
+    commitment: str,
+    input_sha256: str,
+    content_identity_sha256: str,
+) -> Path:
+    """Atomically consume one discovery as authority for one anchor attempt.
+
+    The claim deliberately remains after success, failure, or a process crash.
+    Retrying requires a new live discovery, preventing an unresolved or already
+    used review from authorizing another blockchain transaction.
+    """
+
+    path = review_anchor_claim_path(output_dir, discovery_run_id)
+    record = {
+        "schema": "faceproof-anchor-review-claim/v1",
+        "discovery_run_id": discovery_run_id,
+        "anchor_run_id": anchor_run_id,
+        "manifest_sha256": manifest_sha256,
+        "commitment": commitment,
+        "input_sha256": input_sha256,
+        "content_identity_sha256": content_identity_sha256,
+        "claimed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "single_use": True,
+    }
+    raw = json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError as exc:
+        raise PipelineError(
+            "This reviewed discovery already authorized an anchor attempt; run a new discovery"
+        ) from exc
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception as exc:
+        path.unlink(missing_ok=True)
+        raise PipelineError("Could not reserve the reviewed discovery for anchoring") from exc
+    return path
+
+
 def recover_pending_anchor(run_dir: Path, *, settings: Settings) -> RecoveredAnchorResult:
     """Recover one persisted anchor transaction without signing or rebroadcasting."""
     run_dir = Path(run_dir).resolve()
@@ -788,6 +1114,8 @@ def verify_run(
         commitment = _read_json(run_dir / "commitment.json")
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise PipelineError(f"Cannot read evidence sidecars: {exc}") from exc
+    if manifest.get("run_id") != run_dir.name:
+        raise PipelineError("Manifest run ID does not match its evidence directory")
 
     expected_commitment_fields = {
         "scheme",
@@ -953,7 +1281,15 @@ def _make_provider(
     settings: Settings,
     live: bool,
     search_mode: str = "standard",
-) -> SerpApiLensProvider:
+    search_provider: str = "lens",
+    bluesky_actor: str | None = None,
+) -> Any:
+    if search_provider == "bluesky":
+        return BlueskyAuthorFeedProvider(
+            bluesky_actor or "",
+            timeout_seconds=settings.http_timeout_seconds,
+            consent_confirmed=True,
+        )
     key = settings.require_serpapi_key()
     return SerpApiLensProvider(
         key,
@@ -1004,6 +1340,72 @@ def _face_metadata(encoding: FaceEncoding) -> dict[str, Any]:
         },
         "aligned_size": list(encoding.aligned_size),
     }
+
+
+def _face_error_record(error: FaceError, *, quality_policy: QualityPolicy) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "stage": "face",
+        "error": str(error),
+        # Face processing always precedes the provider call.
+        "search_credit_consumed": False,
+    }
+    if not isinstance(error, FaceQualityError):
+        return record
+
+    metrics = error.metrics
+    record.update(
+        {
+            "error_code": "face-quality",
+            "issues": list(error.issues),
+            "action": _face_quality_action(error.issues, quality_policy=quality_policy),
+            "requirements": {
+                "min_confidence": _decimal(quality_policy.min_confidence),
+                "min_face_size_px": quality_policy.min_face_size_px,
+                "min_face_area_ratio": _decimal(quality_policy.min_face_area_ratio),
+                "min_visible_fraction": _decimal(quality_policy.min_visible_fraction),
+                "min_sharpness": _optional_decimal(quality_policy.min_sharpness),
+                "min_brightness": _optional_decimal(quality_policy.min_brightness),
+                "max_brightness": _optional_decimal(quality_policy.max_brightness),
+            },
+        }
+    )
+    if metrics is not None:
+        record["quality"] = {
+            "confidence": _decimal(metrics.confidence),
+            "face_width_px": _decimal(metrics.face_width_px),
+            "face_height_px": _decimal(metrics.face_height_px),
+            "face_area_ratio": _decimal(metrics.face_area_ratio),
+            "visible_fraction": _decimal(metrics.visible_fraction),
+            "sharpness": _optional_decimal(metrics.sharpness),
+            "brightness": _optional_decimal(metrics.brightness),
+        }
+    return record
+
+
+def _face_quality_action(issues: tuple[str, ...], *, quality_policy: QualityPolicy) -> str:
+    issue_set = set(issues)
+    if issue_set & {"face_too_small", "face_area_too_small"}:
+        return (
+            "Use the original-resolution image or a closer crop containing one face at least "
+            f"{quality_policy.min_face_size_px} pixels wide and high. "
+            "No web-search credit was used."
+        )
+    if "face_too_blurry" in issue_set:
+        return (
+            "Use a sharper, in-focus image with one unobstructed face. "
+            "No web-search credit was used."
+        )
+    if issue_set & {"face_too_dark", "face_too_bright"}:
+        return "Use an evenly lit image with visible facial detail. No web-search credit was used."
+    if "face_clipped_by_frame" in issue_set:
+        return (
+            "Use an image that contains the complete face inside the frame. "
+            "No web-search credit was used."
+        )
+    return (
+        "Use a clear, front-facing image containing one unobstructed face. "
+        "No web-search credit was used."
+    )
 
 
 def _candidate_assessment(evaluation: CandidateEvaluation, *, threshold: float) -> dict[str, Any]:
@@ -1126,6 +1528,125 @@ def _write_search_record(path: Path, run: SearchRun) -> None:
     )
 
 
+def _build_reviewed_content_identity(
+    *,
+    selected: CandidateEvaluation,
+    capture: PostCapture,
+    search_provider: str,
+) -> ReviewedContentIdentity:
+    """Bind review to content bytes and provider-native immutable identifiers."""
+
+    candidate = selected.candidate
+    normalized_url = normalize_page_url(candidate.normalized_url)
+    post_id = candidate.post_id or extract_post_id(normalized_url)
+    if not post_id or capture.metadata.get("post_id") != post_id:
+        raise PipelineError("Captured post identity does not match the selected candidate")
+    captured_page_url = capture.metadata.get("page_url")
+    if not isinstance(captured_page_url, str):
+        raise PipelineError("Captured post identity has no permalink")
+    try:
+        capture_url = normalize_page_url(captured_page_url)
+    except ValueError as exc:
+        raise PipelineError("Captured post identity has an invalid permalink") from exc
+    if capture_url != normalized_url:
+        raise PipelineError("Captured post identity changed before content binding")
+
+    media_hashes = tuple(sorted({item.sha256.casefold() for item in capture.media_artifacts}))
+    for item in media_hashes:
+        _sha256_hex(item, "capture media hash")
+
+    bluesky_at_uri: str | None = None
+    bluesky_post_cid: str | None = None
+    bluesky_image_cid: str | None = None
+    if search_provider == "bluesky":
+        if candidate.provider != "bluesky-public-api":
+            raise PipelineError("Reviewed Bluesky candidate has an invalid provider")
+        try:
+            evidence_ref = BlueskyEvidenceRef.parse(candidate.provider_item_id or "")
+        except ValueError as exc:
+            raise PipelineError("Reviewed Bluesky candidate has invalid CID evidence") from exc
+        identifiers = capture.metadata.get("identifiers")
+        expected_identifiers = {
+            "at_uri": evidence_ref.at_uri,
+            "did": evidence_ref.did,
+            "rkey": evidence_ref.rkey,
+            "post_cid": evidence_ref.post_cid,
+            "image_cid": evidence_ref.image_cid,
+        }
+        if identifiers != expected_identifiers:
+            raise PipelineError("Captured Bluesky CIDs do not match the selected candidate")
+        semantic_content: dict[str, Any] = {"identifiers": expected_identifiers}
+        bluesky_at_uri = evidence_ref.at_uri
+        bluesky_post_cid = evidence_ref.post_cid
+        bluesky_image_cid = evidence_ref.image_cid
+    elif search_provider == "lens":
+        if candidate.provider != "serpapi":
+            raise PipelineError("Reviewed Lens candidate has an invalid provider")
+        if capture.method == "x-oembed":
+            response = capture.metadata.get("response")
+            if not isinstance(response, dict):
+                raise PipelineError("X capture has no content response to bind")
+            stable_keys = {
+                "author_name",
+                "author_url",
+                "html",
+                "thumbnail_url",
+                "title",
+                "type",
+                "url",
+            }
+            semantic_content = {
+                key: response[key] for key in sorted(stable_keys) if key in response
+            }
+            if not semantic_content:
+                raise PipelineError("X capture has no stable content metadata to bind")
+        elif capture.method == "public-html":
+            open_graph = capture.metadata.get("open_graph")
+            if not isinstance(open_graph, dict):
+                raise PipelineError("Public post capture has no content metadata to bind")
+            stable_keys = {
+                "og:description",
+                "og:image",
+                "og:title",
+                "og:url",
+                "twitter:description",
+                "twitter:image",
+                "twitter:title",
+            }
+            semantic_content = {
+                key: open_graph[key] for key in sorted(stable_keys) if key in open_graph
+            }
+            if not semantic_content:
+                raise PipelineError("Public post capture has no stable content metadata to bind")
+        else:
+            raise PipelineError("Post capture method cannot produce a reviewed content identity")
+    else:
+        raise PipelineError("Search provider cannot produce a reviewed content identity")
+
+    capture_projection = {
+        "method": capture.method,
+        "normalized_url": normalized_url,
+        "post_id": post_id,
+        "content": semantic_content,
+    }
+    capture_content_sha256 = hashlib.sha256(_canonical_json(capture_projection)).hexdigest()
+    identity = ReviewedContentIdentity(
+        search_provider=search_provider,
+        normalized_url=normalized_url,
+        post_id=post_id,
+        candidate_media_sha256=_sha256_hex(
+            selected.media_artifact.sha256.casefold(), "candidate media hash"
+        ),
+        capture_method=capture.method,
+        capture_content_sha256=capture_content_sha256,
+        capture_media_sha256=media_hashes,
+        bluesky_at_uri=bluesky_at_uri,
+        bluesky_post_cid=bluesky_post_cid,
+        bluesky_image_cid=bluesky_image_cid,
+    )
+    return ReviewedContentIdentity.from_dict(identity.to_dict())
+
+
 def _manifest_metadata(
     *,
     query_encoding: FaceEncoding,
@@ -1140,6 +1661,8 @@ def _manifest_metadata(
     consent_reference: str | None,
     source_revision: str | None,
     search_mode: str,
+    search_provider: str,
+    bluesky_actor: str | None,
     platforms: frozenset[str] | None,
     profile_evaluations: list[CandidateEvaluation],
     profile_candidate_count: int,
@@ -1148,15 +1671,22 @@ def _manifest_metadata(
     review_run_id: str | None,
     review_manifest_sha256: str | None,
     review_commitment: str | None,
+    review_input_sha256: str | None,
+    content_identity: ReviewedContentIdentity,
+    reviewed_content_identity: ReviewedContentIdentity | None,
     max_candidates: int,
     max_profile_candidates: int,
 ) -> dict[str, Any]:
     candidate = selected.candidate
+    resolved_actor_did = search_run.raw_response.get("resolved_actor_did")
+    if not isinstance(resolved_actor_did, str):
+        resolved_actor_did = None
     return {
         "project": "FaceProof",
         "runtime": _runtime_metadata(source_revision),
         "claim_boundary": [
-            "live_provider_returned_candidate_url",
+            "client_recorded_live_provider_response_with_candidate_record_or_url_identifiers",
+            "client_derived_or_normalized_public_permalink_before_local_face_matching",
             "local_model_similarity_is_not_legal_identity",
             "bundle_integrity_is_not_content_truth",
         ],
@@ -1178,6 +1708,9 @@ def _manifest_metadata(
             "search_ids": list(search_run.search_ids),
             "search_types": list(search_run.search_types),
             "search_mode": search_mode,
+            "provider_strategy": search_provider,
+            "consented_actor": bluesky_actor,
+            "resolved_actor_did": resolved_actor_did,
             "retrieved_at": search_run.retrieved_at,
             "live": search_run.live,
             "provider_mode": search_run.provider_mode,
@@ -1205,6 +1738,8 @@ def _manifest_metadata(
             "threshold_micros": round(threshold * 1_000_000),
             "detected_faces": selected.detected_faces,
             "candidate_media_sha256": selected.media_artifact.sha256,
+            "reviewed_content_identity": content_identity.to_dict(),
+            "reviewed_content_identity_sha256": content_identity.sha256,
             "winning_face": _face_metadata(selected.matched_face),
             "linkage_level": linkage_level,
             "post_media_similarity_micros": (
@@ -1218,6 +1753,15 @@ def _manifest_metadata(
                 "discovery_run_id": review_run_id,
                 "discovery_manifest_sha256": review_manifest_sha256,
                 "discovery_commitment": review_commitment,
+                "discovery_input_sha256": review_input_sha256,
+                "discovery_content_identity_sha256": (
+                    reviewed_content_identity.sha256 if reviewed_content_identity else None
+                ),
+                "content_identity_match": (
+                    content_identity == reviewed_content_identity
+                    if reviewed_content_identity is not None
+                    else None
+                ),
             },
         },
         "capture": {
@@ -1249,6 +1793,46 @@ def _collect_pre_anchor_artifacts(
     if not artifacts:
         raise PipelineError("No evidence artifacts were produced")
     return artifacts, media_types
+
+
+def _validate_manifest_content_artifacts(
+    manifest: dict[str, Any],
+    *,
+    run_dir: Path,
+    selected: CandidateEvaluation,
+    capture: PostCapture,
+) -> None:
+    """Ensure manifest reads saw the same exact media/capture bytes we reviewed."""
+
+    expected: dict[str, tuple[str, int]] = {}
+
+    def add(path: Path, artifact: CapturedFile) -> None:
+        try:
+            logical = path.resolve().relative_to(run_dir.resolve()).as_posix()
+        except (OSError, ValueError) as exc:
+            raise PipelineError("Reviewed content artifact escaped the evidence run") from exc
+        value = (artifact.sha256.casefold(), artifact.byte_size)
+        if logical in expected and expected[logical] != value:
+            raise PipelineError("Reviewed content artifact identity is inconsistent")
+        expected[logical] = value
+
+    add(selected.media_path, selected.media_artifact)
+    for artifact in capture.artifacts:
+        add(selected.directory / artifact.relative_path, artifact)
+
+    records = manifest.get("artifacts")
+    if not isinstance(records, list):
+        raise PipelineError("Evidence manifest has no artifact records")
+    observed = {
+        item.get("path"): (str(item.get("sha256") or "").casefold(), item.get("size"))
+        for item in records
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    mismatches = [path for path, identity in expected.items() if observed.get(path) != identity]
+    if mismatches:
+        raise PipelineError(
+            "Reviewed content bytes changed while the evidence manifest was being built"
+        )
 
 
 def _embedding_fingerprint(values: tuple[float, ...]) -> str:
@@ -1318,6 +1902,25 @@ def _write_json(path: Path, value: Any) -> None:
     _write_bytes_atomic(path, payload)
 
 
+def _canonical_json(value: Any) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise PipelineError("Reviewed content identity is not canonical JSON") from exc
+
+
+def _sha256_hex(value: object, field: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+        raise PipelineError(f"Reviewed content identity {field} is invalid")
+    return value.casefold()
+
+
 def _write_bytes_atomic(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
@@ -1373,7 +1976,9 @@ __all__ = [
     "PipelineError",
     "PipelineResult",
     "RecoveredAnchorResult",
+    "ReviewedContentIdentity",
     "anchor_submission_path",
+    "review_anchor_claim_path",
     "recover_pending_anchor",
     "run_pipeline",
     "run_tamper_demo",
