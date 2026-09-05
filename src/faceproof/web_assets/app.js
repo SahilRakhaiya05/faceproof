@@ -282,6 +282,8 @@ function renderPhotoCopyResult(result) {
     </article>`;
   }).join("");
 
+  const referenceSection = references.length ? `<section class="photo-reference-section"><div class="photo-reference-heading"><span class="section-kicker">ALL WEB SEARCH REFERENCES</span><strong>${escapeHtml(references.length)} unique HTTPS pages found</strong></div><p class="photo-reference-note">These links were returned by the live web reverse search. Verified matches are anchored to the blockchain record.</p><div class="photo-reference-list">${referenceRows}</div></section>` : "";
+
   const filterTabs = matches.length ? `
     <div class="filter-tabs" role="tablist">
       <button class="filter-tab active" data-filter="all">All (${matches.length})</button>
