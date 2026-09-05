@@ -4,11 +4,11 @@ import json
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
-from .base import SearchCandidate, is_social_profile_url, normalize_page_url
+from .base import SearchCandidate, is_social_profile_url, normalize_page_url, platform_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +233,16 @@ def discover_tech_profiles(
             platform = "huggingface"
         elif "github.com" in host:
             platform = "github"
+        elif "kaggle.com" in host:
+            platform = "kaggle"
+        elif "devpost.com" in host:
+            platform = "devpost"
+        elif "leetcode.com" in host:
+            platform = "leetcode"
+        elif "medium.com" in host:
+            platform = "medium"
+        elif "instagram.com" in host:
+            platform = "instagram"
         norm = urlunsplit((parts.scheme, host, parts.path.rstrip("/"), parts.query, ""))
         if norm in seen_urls:
             return
@@ -272,6 +282,59 @@ def discover_tech_profiles(
                         name,
                     )
 
+                    # Twitter handle from GitHub API
+                    tw = gh.get("twitter_username")
+                    if tw and str(tw).strip():
+                        tw_clean = str(tw).strip().lstrip("@")
+                        add(
+                            "x",
+                            f"https://x.com/{tw_clean}",
+                            f"{name} (@{tw_clean}) · X",
+                            handle=tw_clean,
+                            name=name,
+                        )
+                        candidate_handles.add(tw_clean)
+
+                    # Blog / Portfolio Website Deep Crawl
+                    blog = gh.get("blog")
+                    if blog and isinstance(blog, str) and blog.strip():
+                        blog_url = blog.strip()
+                        if not blog_url.startswith("http"):
+                            blog_url = f"https://{blog_url}"
+                        try:
+                            blog_resp = http.get(blog_url)
+                            if blog_resp.status_code == 200:
+                                b_text = blog_resp.text
+                                og_m = re.search(
+                                    r'<meta\s+(?:property|name)=["\']og:image["\']\s+content=["\']([^"\']+)["\']',
+                                    b_text,
+                                    re.I,
+                                )
+                                og_avatar = og_m.group(1) if og_m else None
+                                if og_avatar and not og_avatar.startswith("http"):
+                                    og_avatar = urljoin(blog_url, og_avatar)
+                                add(
+                                    "web",
+                                    blog_url,
+                                    f"{name} · Portfolio & Blog",
+                                    avatar_url=og_avatar,
+                                    name=name,
+                                )
+                                for sm in re.findall(
+                                    r"https?://(?:www\.)?(?:linkedin\.com/in/[a-zA-Z0-9_-]+|"
+                                    r"devfolio\.co/@[a-zA-Z0-9_-]+|"
+                                    r"huggingface\.co/[a-zA-Z0-9_-]+|"
+                                    r"kaggle\.com/[a-zA-Z0-9_-]+|"
+                                    r"devpost\.com/[a-zA-Z0-9_-]+|"
+                                    r"leetcode\.com/(?:u/)?[a-zA-Z0-9_-]+|"
+                                    r"(?:x\.com|twitter\.com)/[a-zA-Z0-9_-]+)",
+                                    b_text,
+                                    re.I,
+                                ):
+                                    add("web", sm, f"{name} · Linked Profile", name=name)
+                        except Exception:
+                            pass
+
                     # README link parsing for connected social badges
                     for branch in ("main", "master"):
                         r_url = f"https://raw.githubusercontent.com/{handle}/{handle}/{branch}/README.md"
@@ -302,6 +365,47 @@ def discover_tech_profiles(
                                 r"https?://huggingface\.co/([a-zA-Z0-9_-]+)", text
                             ):
                                 candidate_handles.add(hm)
+                            # Kaggle
+                            for km in re.findall(
+                                r"https?://(?:www\.)?kaggle\.com/([a-zA-Z0-9_-]+)", text, re.I
+                            ):
+                                if km.lower() not in {"code", "datasets", "learn", "competitions"}:
+                                    add(
+                                        "kaggle",
+                                        f"https://www.kaggle.com/{km}",
+                                        f"{name} (@{km}) · Kaggle",
+                                        handle=km,
+                                        name=name,
+                                    )
+                                    candidate_handles.add(km)
+                            # Devpost
+                            for dpm in re.findall(
+                                r"https?://(?:www\.)?devpost\.com/([a-zA-Z0-9_-]+)", text, re.I
+                            ):
+                                if dpm.lower() not in {"software", "hackathons"}:
+                                    add(
+                                        "devpost",
+                                        f"https://devpost.com/{dpm}",
+                                        f"{name} (@{dpm}) · Devpost",
+                                        handle=dpm,
+                                        name=name,
+                                    )
+                                    candidate_handles.add(dpm)
+                            # LeetCode
+                            for lcm in re.findall(
+                                r"https?://(?:www\.)?leetcode\.com/(?:u/)?([a-zA-Z0-9_-]+)",
+                                text,
+                                re.I,
+                            ):
+                                if lcm.lower() not in {"problems", "contest", "discuss", "explore"}:
+                                    add(
+                                        "leetcode",
+                                        f"https://leetcode.com/u/{lcm}",
+                                        f"{name} (@{lcm}) · LeetCode",
+                                        handle=lcm,
+                                        name=name,
+                                    )
+                                    candidate_handles.add(lcm)
                             # X / Twitter
                             for xm in re.findall(
                                 r"https?://(?:x\.com|twitter\.com)/([a-zA-Z0-9_-]+)",
@@ -388,7 +492,35 @@ def discover_tech_profiles(
             except Exception:
                 pass
 
-        # 4. Search-based discovery for known candidate names
+        # 4. Kaggle probe
+        for handle in list(candidate_handles):
+            try:
+                resp = http.get(f"https://www.kaggle.com/{handle}")
+                if resp.status_code == 200:
+                    add(
+                        "kaggle",
+                        f"https://www.kaggle.com/{handle}",
+                        f"{handle} · Kaggle",
+                        handle=handle,
+                    )
+            except Exception:
+                pass
+
+        # 5. Devpost probe
+        for handle in list(candidate_handles):
+            try:
+                resp = http.get(f"https://devpost.com/{handle}")
+                if resp.status_code == 200:
+                    add(
+                        "devpost",
+                        f"https://devpost.com/{handle}",
+                        f"{handle} · Devpost",
+                        handle=handle,
+                    )
+            except Exception:
+                pass
+
+        # 6. Search-based discovery for known candidate names
         for name in list(candidate_names):
             if len(name.split()) >= 2:
                 try:
@@ -464,3 +596,95 @@ def discover_tech_profiles(
             http.close()
 
     return discovered
+
+
+def _resolve_profile_avatar(url: str, *, fallback_avatar: str | None = None) -> str | None:
+    """Resolve direct avatar URL for common developer/social platforms."""
+    gh_match = re.search(r"github\.com/([a-zA-Z0-9_-]+)", url, re.I)
+    if gh_match:
+        gh_handle = gh_match.group(1)
+        if gh_handle.lower() not in {
+            "topics",
+            "trending",
+            "explore",
+            "settings",
+            "about",
+            "orgs",
+            "features",
+        }:
+            return f"https://github.com/{gh_handle}.png"
+
+    return fallback_avatar
+
+
+def search_profiles_by_name(
+    name: str,
+    *,
+    api_key: str | None = None,
+    client: httpx.Client | None = None,
+    timeout_seconds: float = 12.0,
+    primary_avatar: str | None = None,
+) -> list[SearchCandidate]:
+    """Perform targeted secondary name search across professional & tech networks."""
+    if not name or len(name.strip().split()) < 2:
+        return []
+    if not api_key:
+        return []
+
+    owns_client = client is None
+    http = client or httpx.Client(
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        follow_redirects=True,
+        timeout=timeout_seconds,
+    )
+    candidates: list[SearchCandidate] = []
+    clean_name = name.strip()
+    query = (
+        f'"{clean_name}" '
+        "(site:github.com OR site:linkedin.com/in OR site:devfolio.co OR "
+        "site:huggingface.co OR site:kaggle.com OR site:devpost.com OR site:leetcode.com)"
+    )
+    try:
+        resp = http.get(
+            "https://serpapi.com/search.json",
+            params={
+                "engine": "google",
+                "q": query,
+                "api_key": api_key,
+                "num": 10,
+            },
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            for idx, item in enumerate(data.get("organic_results", []), start=1):
+                link = item.get("link")
+                if not link or not link.startswith("https://"):
+                    continue
+                try:
+                    norm = normalize_page_url(link)
+                except ValueError:
+                    norm = link
+                title = item.get("title") or norm
+                avatar = _resolve_profile_avatar(norm, fallback_avatar=primary_avatar)
+                cand = SearchCandidate(
+                    provider="name-search",
+                    rank=idx,
+                    page_url=link,
+                    normalized_url=norm,
+                    title=title,
+                    source=platform_name(norm) or "web",
+                    image_url=avatar,
+                    thumbnail_url=avatar,
+                    provider_score=0.9,
+                    exact_match=False,
+                    result_type="name_search_profile",
+                    post_id=None,
+                )
+                candidates.append(cand)
+    except Exception:
+        pass
+    finally:
+        if owns_client:
+            http.close()
+
+    return candidates

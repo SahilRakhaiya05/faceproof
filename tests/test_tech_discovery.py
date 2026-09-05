@@ -379,3 +379,132 @@ def test_evm_helpers() -> None:
     assert "sepolia.basescan.org" in explorer_url_for_tx(84532, "0x123abc")
     assert network_name_for_chain_id(11155111) == "Ethereum Sepolia"
     assert network_name_for_chain_id(84532) == "Base Sepolia"
+
+
+def test_platform_classification_kaggle_devpost_leetcode() -> None:
+    assert platform_name("https://www.kaggle.com/rajbhattacharyya") == "kaggle"
+    assert classify_domain("https://www.kaggle.com/rajbhattacharyya") == "kaggle"
+    assert is_social_profile_url("https://www.kaggle.com/rajbhattacharyya") is True
+
+    assert platform_name("https://devpost.com/raj_frrr") == "devpost"
+    assert classify_domain("https://devpost.com/raj_frrr") == "devpost"
+    assert is_social_profile_url("https://devpost.com/raj_frrr") is True
+
+    assert platform_name("https://leetcode.com/u/rajbhattacharyya") == "leetcode"
+    assert classify_domain("https://leetcode.com/u/rajbhattacharyya") == "leetcode"
+    assert is_social_profile_url("https://leetcode.com/u/rajbhattacharyya") is True
+
+
+@respx.mock
+def test_search_profiles_by_name() -> None:
+    from faceproof.search.tech_discovery import search_profiles_by_name
+
+    respx.get("https://serpapi.com/search.json").respond(
+        status_code=200,
+        json={
+            "organic_results": [
+                {
+                    "link": "https://github.com/RajBhattacharyya",
+                    "title": "RajBhattacharyya - GitHub",
+                },
+                {
+                    "link": "https://devfolio.co/@raj-bhattacharyya18",
+                    "title": "Raj Bhattacharyya · Devfolio",
+                },
+            ]
+        },
+    )
+
+    candidates = search_profiles_by_name(
+        "Raj Bhattacharyya",
+        api_key="mock_key",
+        primary_avatar="https://example.com/verified_avatar.jpg",
+    )
+
+    assert len(candidates) == 2
+    gh_cand = next(c for c in candidates if "github.com" in c.normalized_url)
+    assert gh_cand.image_url == "https://github.com/RajBhattacharyya.png"
+    assert gh_cand.result_type == "name_search_profile"
+
+    dev_cand = next(c for c in candidates if "devfolio.co" in c.normalized_url)
+    assert dev_cand.image_url == "https://example.com/verified_avatar.jpg"
+    assert dev_cand.result_type == "name_search_profile"
+
+
+def test_provenance_graph_in_photo_search(tmp_path: Path) -> None:
+    settings = Settings(
+        serpapi_api_key="test-key",
+        model_dir=tmp_path / "models",
+        output_dir=tmp_path / "evidence",
+        rpc_url="http://127.0.0.1:8545",
+        chain_id=84532,
+        contract_address=None,
+        private_key=None,
+        confirmations=1,
+        http_timeout_seconds=2,
+    )
+
+    img = Image.new("RGB", (100, 100), color=(120, 120, 120))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    query_bytes = buf.getvalue()
+
+    class _MockProvider:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> _MockProvider:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def search(self, *args: Any, **kwargs: Any) -> SearchRun:
+            return SearchRun(
+                provider="serpapi",
+                search_id="prov_test_id",
+                retrieved_at="2026-09-05T00:00:00Z",
+                live=False,
+                search_types=("all",),
+                candidates=(
+                    SearchCandidate(
+                        provider="serpapi",
+                        rank=1,
+                        page_url="https://github.com/RajBhattacharyya",
+                        normalized_url="https://github.com/RajBhattacharyya",
+                        title="RajBhattacharyya (Raj Bhattacharyya) · GitHub",
+                    ),
+                ),
+                raw_response={},
+                web_labels=("Raj Bhattacharyya",),
+            )
+
+    def download(candidate: Any, temporary: Path, timeout_seconds: float = 10) -> CapturedFile:
+        dest = temporary / "image.jpg"
+        dest.write_bytes(query_bytes)
+        return CapturedFile(
+            relative_path="image.jpg",
+            sha256="fake_sha",
+            byte_size=len(query_bytes),
+            media_type="image/jpeg",
+        )
+
+    run_dir = tmp_path / "prov_run"
+    result = run_photo_search(
+        query_bytes,
+        "query_sha",
+        run_dir,
+        settings,
+        lambda _m: None,
+        provider_factory=_MockProvider,
+        download=download,
+        scan=lambda _path, _settings: {"status": "not-encoded", "embedding_saved": False},
+    )
+
+    assert "provenance_graph" in result
+    prov = result["provenance_graph"]
+    assert prov["root"]["type"] == "query_photo"
+    assert "Raj Bhattacharyya" in prov["identity_seeds"]["names"]
+    assert "RajBhattacharyya" in prov["identity_seeds"]["handles"]
+    assert prov["nodes_count"] >= 1
+    assert prov["edges_count"] >= 1

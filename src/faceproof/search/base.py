@@ -12,22 +12,30 @@ SOCIAL_HOSTS = frozenset(
     {
         "bsky.app",
         "devfolio.co",
+        "devpost.com",
         "facebook.com",
         "github.com",
         "huggingface.co",
         "instagram.com",
+        "kaggle.com",
+        "leetcode.com",
         "linkedin.com",
         "m.facebook.com",
+        "medium.com",
         "reddit.com",
         "tiktok.com",
         "twitter.com",
         "x.com",
         "www.devfolio.co",
+        "www.devpost.com",
         "www.facebook.com",
         "www.github.com",
         "www.huggingface.co",
         "www.instagram.com",
+        "www.kaggle.com",
+        "www.leetcode.com",
         "www.linkedin.com",
+        "www.medium.com",
         "www.reddit.com",
         "www.tiktok.com",
         "www.twitter.com",
@@ -42,11 +50,15 @@ SUPPORTED_PLATFORMS = frozenset(
     {
         "bluesky",
         "devfolio",
+        "devpost",
         "facebook",
         "github",
         "huggingface",
         "instagram",
+        "kaggle",
+        "leetcode",
         "linkedin",
+        "medium",
         "reddit",
         "tiktok",
         "x",
@@ -302,6 +314,10 @@ def platform_name(url: str) -> str | None:
         ("githubusercontent.com", "github"),
         ("devfolio.co", "devfolio"),
         ("huggingface.co", "huggingface"),
+        ("devpost.com", "devpost"),
+        ("kaggle.com", "kaggle"),
+        ("leetcode.com", "leetcode"),
+        ("medium.com", "medium"),
         ("linkedin.com", "linkedin"),
         ("instagram.com", "instagram"),
         ("twitter.com", "x"),
@@ -345,6 +361,29 @@ def is_social_profile_url(url: str) -> bool:
         }
         return len(segments) == 1 and segments[0].casefold() not in reserved
     if platform == "devfolio":
+        return len(segments) == 1 and segments[0].startswith("@")
+    if platform == "kaggle":
+        reserved = {
+            "code",
+            "competitions",
+            "datasets",
+            "discussions",
+            "learn",
+            "models",
+            "rankings",
+        }
+        return len(segments) == 1 and segments[0].casefold() not in reserved
+    if platform == "devpost":
+        reserved = {"hackathons", "projects", "rules", "software", "terms"}
+        return len(segments) == 1 and segments[0].casefold() not in reserved
+    if platform == "leetcode":
+        return (
+            len(segments) == 2
+            and segments[0].casefold() == "u"
+            or len(segments) == 1
+            and segments[0].casefold() not in {"contest", "discuss", "explore", "problems"}
+        )
+    if platform == "medium":
         return len(segments) == 1 and segments[0].startswith("@")
     if platform == "huggingface":
         reserved = {

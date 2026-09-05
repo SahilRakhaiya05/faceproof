@@ -50,6 +50,7 @@ from .search.tech_discovery import (
     extract_identity_seeds,
     extract_name_tokens,
     is_profile_consistent_with_subject,
+    search_profiles_by_name,
 )
 
 MAX_BYTES = 25 * 1024 * 1024
@@ -81,7 +82,10 @@ def _candidate_priority(candidate: Any) -> tuple[int, int]:
     url = getattr(candidate, "normalized_url", "")
     host = (urlsplit(url).hostname or "").lower()
     platform = classify_domain(url).lower()
-    if getattr(candidate, "result_type", "") == "verified_developer_profile":
+    if getattr(candidate, "result_type", "") in {
+        "verified_developer_profile",
+        "name_search_profile",
+    }:
         return (0, 0)
     exact = bool(getattr(candidate, "exact_match", False))
     if exact:
@@ -92,6 +96,10 @@ def _candidate_priority(candidate: Any) -> tuple[int, int]:
         "huggingface",
         "linkedin",
         "github",
+        "kaggle",
+        "devpost",
+        "leetcode",
+        "medium",
         "x",
         "instagram",
         "facebook",
@@ -106,6 +114,10 @@ def _candidate_priority(candidate: Any) -> tuple[int, int]:
             "huggingface.",
             "linkedin.",
             "github.",
+            "kaggle.",
+            "devpost.",
+            "leetcode.",
+            "medium.",
             "twitter.",
             "x.com",
             "instagram.",
@@ -288,6 +300,10 @@ def run_photo_search(
     _write(run_dir / "provider.json", provider_record)
     candidates = list(found.candidates)
     subject_tokens: set[str] = set()
+    stage_2_profiles: list[dict[str, Any]] = []
+    seed_handles: set[str] = set()
+    seed_names: set[str] = set()
+    primary_avatar: str | None = None
     try:
         seed_handles, seed_names = extract_identity_seeds(candidates, found.web_labels)
         for name in seed_names:
@@ -295,9 +311,7 @@ def run_photo_search(
         for h in seed_handles:
             subject_tokens.update(extract_name_tokens(h.replace("-", " ").replace("_", " ")))
         if seed_handles or seed_names:
-            emit(
-                "Running deep tech discovery across Devfolio, Hugging Face, GitHub & tech networks."
-            )
+            emit("Running deep tech discovery across Devfolio, Hugging Face, GitHub & networks.")
             discoverer = tech_discoverer or discover_tech_profiles
             tech_profiles = discoverer(
                 seed_handles, seed_names, timeout_seconds=settings.http_timeout_seconds
@@ -306,6 +320,46 @@ def run_photo_search(
                 candidates.append(tp.to_candidate(rank=0))
                 if tp.name:
                     subject_tokens.update(extract_name_tokens(tp.name))
+                    seed_names.add(tp.name)
+                stage_2_profiles.append(
+                    {
+                        "url": tp.url,
+                        "platform": tp.platform,
+                        "seed_source": "tech_probe",
+                        "title": tp.title,
+                    }
+                )
+                if not primary_avatar and tp.avatar_url and not tp.avatar_url.endswith(".svg"):
+                    primary_avatar = tp.avatar_url
+
+        # Stage 2: Recursive targeted deep name search
+        if settings.serpapi_api_key and seed_names:
+            for s_name in sorted(seed_names):
+                parts = s_name.strip().split()
+                if len(parts) >= 2 and len(s_name.strip()) >= 5:
+                    emit(
+                        f"Stage 2: Recursive deep search for '{s_name}' across developer networks."
+                    )
+                    name_candidates = search_profiles_by_name(
+                        s_name,
+                        api_key=settings.serpapi_api_key,
+                        timeout_seconds=settings.http_timeout_seconds,
+                        primary_avatar=primary_avatar,
+                    )
+                    if name_candidates:
+                        emit(f"Discovered {len(name_candidates)} profiles for '{s_name}'.")
+                        for nc in name_candidates:
+                            candidates.append(nc)
+                            if nc.title:
+                                subject_tokens.update(extract_name_tokens(nc.title))
+                            stage_2_profiles.append(
+                                {
+                                    "url": nc.normalized_url,
+                                    "platform": classify_domain(nc.normalized_url),
+                                    "seed_source": "name_search",
+                                    "title": nc.title,
+                                }
+                            )
     except Exception:
         pass
     for c in candidates[:2]:
@@ -356,9 +410,10 @@ def run_photo_search(
         checked += 1
         total_eval = min(len(candidates), MAX_CANDIDATES)
         emit(f"Evaluating candidate {checked}/{total_eval} with dual face + photo match.")
-        is_verified_developer = (
-            getattr(candidate, "result_type", "") == "verified_developer_profile"
-        )
+        is_verified_developer = getattr(candidate, "result_type", "") in {
+            "verified_developer_profile",
+            "name_search_profile",
+        }
         try:
             with tempfile.TemporaryDirectory(prefix="photo-copy-") as temporary:
                 if is_verified_developer:
@@ -369,10 +424,13 @@ def run_photo_search(
                         raw = full_media_path.read_bytes()
                         source_media_url = media.source_url
                     except Exception:
-                        full_media_path = Path(temporary) / "developer_avatar.jpg"
-                        full_media_path.write_bytes(query)
-                        raw = query
-                        source_media_url = candidate.image_url or candidate.page_url
+                        if getattr(candidate, "result_type", "") == "verified_developer_profile":
+                            full_media_path = Path(temporary) / "developer_avatar.jpg"
+                            full_media_path.write_bytes(query)
+                            raw = query
+                            source_media_url = candidate.image_url or candidate.page_url
+                        else:
+                            raise
                 else:
                     media = download(candidate, Path(temporary), timeout_seconds=10)
                     media_path = Path(media.relative_path)
@@ -515,6 +573,43 @@ def run_photo_search(
         for path in sorted(run_dir.iterdir())
         if path.is_file()
     }
+    provenance_graph = {
+        "root": {
+            "type": "query_photo",
+            "sha256": _digest(query),
+            "faces_detected": 1 if query_encoding is not None else 0,
+        },
+        "identity_seeds": {
+            "names": sorted(list(seed_names)),
+            "handles": sorted(list(seed_handles)),
+        },
+        "stage_1_lens": [
+            {
+                "url": m["url"],
+                "platform": m.get("platform", "web"),
+                "match_type": m.get("match_type"),
+                "face_similarity": m.get("face_similarity", 0.0),
+                "title": m.get("title", ""),
+            }
+            for m in matches
+            if m.get("page_association") != "verified-developer-identity"
+            and not any(p["url"] == m["url"] for p in stage_2_profiles)
+        ],
+        "stage_2_recursive": [
+            {
+                "url": p["url"],
+                "platform": p.get("platform", "web"),
+                "seed_source": p.get("seed_source", "recursive_probe"),
+                "status": (
+                    "confirmed-match" if any(m["url"] == p["url"] for m in matches) else "candidate"
+                ),
+                "title": p.get("title", ""),
+            }
+            for p in stage_2_profiles
+        ],
+        "nodes_count": 1 + len(seed_names) + len(seed_handles) + len(matches),
+        "edges_count": len(seed_names) + len(seed_handles) + len(matches) + len(stage_2_profiles),
+    }
     manifest = {
         "schema": "faceproof-photo-copy-evidence-v1",
         "run_id": run_dir.name,
@@ -532,6 +627,7 @@ def run_photo_search(
         "face_scan": face,
         "references": references,
         "matches": matches,
+        "provenance_graph": provenance_graph,
         "artifacts": artifacts,
         "claim": "Whole-photo copies; page associations supplied by search; no identity claim.",
     }

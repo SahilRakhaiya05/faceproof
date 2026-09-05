@@ -168,6 +168,9 @@ function renderPhotoCopyResult(result) {
     huggingface: 0,
     github: 0,
     linkedin: 0,
+    kaggle: 0,
+    devpost: 0,
+    leetcode: 0,
     social: 0,
     web: 0,
   };
@@ -177,6 +180,9 @@ function renderPhotoCopyResult(result) {
     else if (p.includes("huggingface")) platformCounts.huggingface++;
     else if (p.includes("github")) platformCounts.github++;
     else if (p.includes("linkedin")) platformCounts.linkedin++;
+    else if (p.includes("kaggle")) platformCounts.kaggle++;
+    else if (p.includes("devpost")) platformCounts.devpost++;
+    else if (p.includes("leetcode")) platformCounts.leetcode++;
     else if (["x", "twitter", "reddit", "bluesky", "youtube", "facebook", "instagram", "tiktok"].some(s => p.includes(s))) platformCounts.social++;
     else platformCounts.web++;
   }
@@ -191,10 +197,13 @@ function renderPhotoCopyResult(result) {
     const isHuggingface = platform.includes("huggingface");
     const isGithub = platform.includes("github");
     const isLinkedin = platform.includes("linkedin");
+    const isKaggle = platform.includes("kaggle");
+    const isDevpost = platform.includes("devpost");
+    const isLeetcode = platform.includes("leetcode");
     const isSocial = ["x", "twitter", "reddit", "bluesky", "youtube", "facebook", "instagram", "tiktok"].some(s => platform.includes(s));
-    const platformClass = isDevfolio ? "devfolio" : isHuggingface ? "huggingface" : isGithub ? "github" : isLinkedin ? "linkedin" : isSocial ? "social" : "web";
-    const platformLabel = isDevfolio ? "Devfolio" : isHuggingface ? "Hugging Face" : isGithub ? "GitHub" : isLinkedin ? "LinkedIn" : isSocial ? (match.platform?.toUpperCase() || "Social") : "Web Page";
-    const categoryAttr = isDevfolio ? "devfolio" : isHuggingface ? "huggingface" : isGithub ? "github" : isLinkedin ? "linkedin" : isSocial ? "social" : "web";
+    const platformClass = isDevfolio ? "devfolio" : isHuggingface ? "huggingface" : isGithub ? "github" : isLinkedin ? "linkedin" : isKaggle ? "kaggle" : isDevpost ? "devpost" : isLeetcode ? "leetcode" : isSocial ? "social" : "web";
+    const platformLabel = isDevfolio ? "Devfolio" : isHuggingface ? "Hugging Face" : isGithub ? "GitHub" : isLinkedin ? "LinkedIn" : isKaggle ? "Kaggle" : isDevpost ? "Devpost" : isLeetcode ? "LeetCode" : isSocial ? (match.platform?.toUpperCase() || "Social") : "Web Page";
+    const categoryAttr = isDevfolio ? "devfolio" : isHuggingface ? "huggingface" : isGithub ? "github" : isLinkedin ? "linkedin" : isKaggle ? "kaggle" : isDevpost ? "devpost" : isLeetcode ? "leetcode" : isSocial ? "social" : "web";
 
     const faceAcc = match.face_accuracy_percent != null && match.face_accuracy_percent > 0 ? match.face_accuracy_percent : null;
     const photoScore = comparison.score != null ? comparison.score : null;
@@ -223,20 +232,33 @@ function renderPhotoCopyResult(result) {
         
         <div class="scores-row">
           ${faceAcc != null ? `
-          <div class="score-pill face-score">
-            <span class="score-label">Identity Confidence</span>
-            <strong class="score-val">${faceAcc}%</strong>
-            <div class="score-bar"><span style="width: ${faceAcc}%"></span></div>
+          <div class="score-pill face-score-pill">
+            <div class="score-pill-header">
+              <span class="score-pill-label"><span class="pill-dot green"></span> Neural Face Match</span>
+              <strong class="score-pill-val ${faceAcc >= 80 ? "high" : faceAcc >= 50 ? "mid" : "low"}">${faceAcc.toFixed(1)}%</strong>
+            </div>
+            <div class="mini-progress-track">
+              <div class="mini-progress-fill green" style="width: ${Math.min(100, Math.max(0, faceAcc))}%"></div>
+            </div>
           </div>` : ""}
           ${photoScore != null ? `
-          <div class="score-pill photo-score">
-            <span class="score-label">Visual Match</span>
-            <strong class="score-val">${photoScore}%</strong>
-            <div class="score-bar"><span style="width: ${photoScore}%"></span></div>
+          <div class="score-pill visual-score-pill">
+            <div class="score-pill-header">
+              <span class="score-pill-label"><span class="pill-dot blue"></span> Visual / Hash Match</span>
+              <strong class="score-pill-val ${photoScore >= 80 ? "high" : photoScore >= 50 ? "mid" : "low"}">${photoScore}%</strong>
+            </div>
+            <div class="mini-progress-track">
+              <div class="mini-progress-fill blue" style="width: ${Math.min(100, Math.max(0, photoScore))}%"></div>
+            </div>
           </div>` : ""}
         </div>
 
-        <small class="copy-metrics">Platform: <b>${platformLabel}</b> · pHash ${escapeHtml(metrics.phash_hamming_distance ?? "—")} · SSIM ${escapeHtml(metrics.structural_similarity ?? "—")} · Status: <b>${escapeHtml(match.classification || "confirmed")}</b></small>
+        <div class="match-meta">
+          <span>Platform: <strong>${escapeHtml(match.platform || "Web")}</strong></span>
+          ${metrics.phash_distance != null ? `<span>pHash: <strong>${escapeHtml(metrics.phash_distance)}</strong></span>` : ""}
+          ${metrics.ssim != null ? `<span>SSIM: <strong>${escapeHtml(metrics.ssim.toFixed(6))}</strong></span>` : ""}
+          <span>Status: <strong>${escapeHtml(match.classification)}</strong></span>
+        </div>
       </div>
     </article>`;
   }).join("");
@@ -267,11 +289,29 @@ function renderPhotoCopyResult(result) {
       ${platformCounts.huggingface > 0 ? `<button class="filter-tab" data-filter="huggingface">Hugging Face (${platformCounts.huggingface})</button>` : ""}
       ${platformCounts.github > 0 ? `<button class="filter-tab" data-filter="github">GitHub (${platformCounts.github})</button>` : ""}
       ${platformCounts.linkedin > 0 ? `<button class="filter-tab" data-filter="linkedin">LinkedIn (${platformCounts.linkedin})</button>` : ""}
+      ${platformCounts.kaggle > 0 ? `<button class="filter-tab" data-filter="kaggle">Kaggle (${platformCounts.kaggle})</button>` : ""}
+      ${platformCounts.devpost > 0 ? `<button class="filter-tab" data-filter="devpost">Devpost (${platformCounts.devpost})</button>` : ""}
+      ${platformCounts.leetcode > 0 ? `<button class="filter-tab" data-filter="leetcode">LeetCode (${platformCounts.leetcode})</button>` : ""}
       ${platformCounts.social > 0 ? `<button class="filter-tab" data-filter="social">Social Media (${platformCounts.social})</button>` : ""}
       ${platformCounts.web > 0 ? `<button class="filter-tab" data-filter="web">Web &amp; Media (${platformCounts.web})</button>` : ""}
     </div>` : "";
 
   const evmReceipt = result?.evm_receipt;
+  const provGraph = result?.provenance_graph;
+  const provSection = provGraph && (provGraph.identity_seeds?.names?.length || provGraph.stage_2_recursive?.length) ? `
+    <div class="provenance-card">
+      <div class="provenance-card-header">
+        <span class="provenance-card-title">Multi-Hop Provenance Graph · Recursive Identity Traversal</span>
+        <span class="reference-badge active">${escapeHtml(String(provGraph.nodes_count || 0))} nodes · ${escapeHtml(String(provGraph.edges_count || 0))} edges</span>
+      </div>
+      <div class="provenance-nodes">
+        <div class="provenance-node"><span class="prov-dot query"></span> Query Photo</div>
+        <span class="provenance-arrow">➔</span>
+        ${(provGraph.identity_seeds?.names || []).map(n => `<div class="provenance-node"><span class="prov-dot seed"></span> Identity: ${escapeHtml(n)}</div>`).join("")}
+        ${(provGraph.stage_2_recursive?.length) ? `<span class="provenance-arrow">➔</span>` : ""}
+        ${(provGraph.stage_2_recursive || []).slice(0, 6).map(p => `<div class="provenance-node"><span class="prov-dot ${escapeHtml(p.status)}"></span> ${escapeHtml(p.platform?.toUpperCase() || "WEB")}</div>`).join("")}
+      </div>
+    </div>` : "";
 
   output.innerHTML = `<header class="photo-proof-header">
     <div>
@@ -291,6 +331,7 @@ function renderPhotoCopyResult(result) {
       <small>Evaluates candidate faces independently with SFace cosine similarity and perceptual hashing.</small>
     </div>
   </div>
+  ${provSection}
   ${filterTabs}
   ${matches.length ? `<section class="photo-match-list">${links}</section>` : ""}
   ${referenceSection}
