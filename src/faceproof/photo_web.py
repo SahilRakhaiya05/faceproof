@@ -29,14 +29,14 @@ from starlette.concurrency import run_in_threadpool
 
 from .capture import CaptureError, materialize_candidate_image
 from .config import Settings
-from .face import FaceError, OpenCVFaceBackend, cosine_similarity
+from .face import FaceError, FaceQualityError, OpenCVFaceBackend, cosine_similarity
 from .photo_chain import PhotoChain, PhotoChainError
 from .photo_copy import PhotoInputError, compare_photos, normalize_photo
 from .search.base import classify_domain, is_social_post_url, redact_url_secrets
 from .search.serpapi import SerpApiLensProvider
 
 MAX_BYTES = 25 * 1024 * 1024
-MAX_CANDIDATES = 24
+MAX_CANDIDATES = 48
 RUN_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -59,8 +59,92 @@ def _write(path: Path, value: dict[str, Any], *, canonical: bool = False) -> Non
     temporary.replace(path)
 
 
+def _candidate_priority(candidate: Any) -> tuple[int, int]:
+    """Sort candidates so identity and profile leads are evaluated first."""
+    url = getattr(candidate, "normalized_url", "")
+    host = (urlsplit(url).hostname or "").lower()
+    platform = classify_domain(url).lower()
+    exact = bool(getattr(candidate, "exact_match", False))
+    if exact:
+        return (0, getattr(candidate, "rank", 999))
+
+    profile_platforms = {
+        "linkedin",
+        "github",
+        "x",
+        "instagram",
+        "facebook",
+        "youtube",
+        "reddit",
+        "bluesky",
+    }
+    if platform in profile_platforms or any(
+        k in host for k in ("linkedin.", "github.", "twitter.", "x.com", "instagram.", "facebook.")
+    ):
+        return (1, getattr(candidate, "rank", 999))
+
+    bio_patterns = ("/in/", "/user/", "/profile/", "/alumni", "/faculty", "/team", "/author/")
+    if host.endswith((".edu", ".ac.in", ".org")) or any(k in url.lower() for k in bio_patterns):
+        return (2, getattr(candidate, "rank", 999))
+
+    shopping_hosts = (
+        "amazon.",
+        "myntra.",
+        "flipkart.",
+        "ajio.",
+        "tatacliq.",
+        "meesho.",
+        "peterengland.",
+        "louisphilippe.",
+        "hm.com",
+        "zara.com",
+        "uniqlo.",
+        "shoppersstop.",
+        "jackjones.",
+        "asos.",
+        "superdry.",
+    )
+    if any(shop in host for shop in shopping_hosts):
+        return (4, getattr(candidate, "rank", 999))
+
+    return (3, getattr(candidate, "rank", 999))
+
+
+def _crop_face_focus(
+    image_path: Path,
+    encoding: Any,
+    output_path: Path,
+    *,
+    margin_ratio: float = 0.25,
+) -> Path | None:
+    """Save an aligned face crop with margin for deep Google Lens visual search."""
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as img:
+            detection = getattr(encoding, "detection", None)
+            if detection is None or not hasattr(detection, "box"):
+                return None
+            bbox = detection.box
+            width, height = img.size
+            margin_x = bbox.width * margin_ratio
+            margin_y = bbox.height * margin_ratio
+            left = max(0, int(bbox.x - margin_x))
+            top = max(0, int(bbox.y - margin_y))
+            right = min(width, int(bbox.x + bbox.width + margin_x))
+            bottom = min(height, int(bbox.y + bbox.height + margin_y))
+            if right <= left or bottom <= top:
+                return None
+            crop = img.crop((left, top, right, bottom))
+            crop.save(output_path, format="JPEG", quality=95)
+            return output_path
+    except Exception:
+        return None
+
+
 def _local_scan(path: Path, settings: Settings) -> dict[str, Any]:
     """Encode the input locally for the rubric and dual face matching."""
+    backend: OpenCVFaceBackend | None = None
     try:
         backend = OpenCVFaceBackend(settings.yunet_model, settings.sface_model)
         encoded = backend.encode_one(path)
@@ -72,6 +156,28 @@ def _local_scan(path: Path, settings: Settings) -> dict[str, Any]:
             "used_for_search_or_matching": True,
             "embedding_saved": False,
             "_encoding": encoded,
+        }
+    except FaceQualityError:
+        if backend is not None:
+            try:
+                encoded = backend.encode_primary_face(path)
+                return {
+                    "status": "encoded-locally",
+                    "dimensions": len(encoded.embedding),
+                    "detector": "YuNet",
+                    "encoder": "SFace",
+                    "used_for_search_or_matching": True,
+                    "embedding_saved": False,
+                    "_encoding": encoded,
+                }
+            except Exception:
+                pass
+        return {
+            "status": "not-encoded",
+            "reason": "FaceQualityError",
+            "used_for_search_or_matching": False,
+            "embedding_saved": False,
+            "_encoding": None,
         }
     except FaceError as exc:
         return {
@@ -108,18 +214,37 @@ def run_photo_search(
             face_backend = OpenCVFaceBackend(settings.yunet_model, settings.sface_model)
         except Exception:
             face_backend = None
+
+    focus_crop: Path | None = None
+    if query_encoding is not None:
+        focus_path = run_dir / "face-crop.jpg"
+        if _crop_face_focus(query_path, query_encoding, focus_path):
+            focus_crop = focus_path
+
+    search_mode = "deep" if focus_crop is not None else "standard"
     emit("Searching the indexed web across GitHub, LinkedIn, social & web pages · 1 search credit.")
-    with provider_factory(
-        settings.require_serpapi_key(),
-        timeout_seconds=settings.http_timeout_seconds,
-        # ``standard`` returns both Lens exact and visual references. The
-        # complete-photo matcher below decides which returned images are actual
-        # copies; restricting the provider to its exact lane would miss resized
-        # or re-encoded copies.
-        search_mode="standard",
-        no_cache=True,
-    ) as provider:
-        found = provider.search(query_path)
+    try:
+        provider_ctx = provider_factory(
+            settings.require_serpapi_key(),
+            timeout_seconds=settings.http_timeout_seconds,
+            search_mode=search_mode,
+            no_cache=True,
+        )
+    except TypeError:
+        provider_ctx = provider_factory(
+            settings.require_serpapi_key(),
+            timeout_seconds=settings.http_timeout_seconds,
+            no_cache=True,
+        )
+
+    with provider_ctx as provider:
+        try:
+            if focus_crop is not None:
+                found = provider.search(query_path, focus_image_path=focus_crop)
+            else:
+                found = provider.search(query_path)
+        except TypeError:
+            found = provider.search(query_path)
     provider_record = {
         "provider": found.provider,
         "search_id": found.search_id,
@@ -130,6 +255,7 @@ def run_photo_search(
     }
     _write(run_dir / "provider.json", provider_record)
     candidates = list(found.candidates)
+    candidates.sort(key=_candidate_priority)
     emit(f"Search returned {len(candidates)} image references; checking up to {MAX_CANDIDATES}.")
     matches: list[dict[str, Any]] = []
     references: list[dict[str, Any]] = []
@@ -195,7 +321,7 @@ def run_photo_search(
 
                 if query_encoding is not None and face_backend is not None:
                     try:
-                        cand_encodings = face_backend.encode_faces(full_media_path)
+                        cand_encodings = face_backend.encode_faces_permissive(full_media_path)
                         candidate_faces_detected = len(cand_encodings)
                         if cand_encodings:
                             scores = [
@@ -203,10 +329,32 @@ def run_photo_search(
                                 for enc in cand_encodings
                             ]
                             face_similarity = float(max(scores))
-                            face_accuracy_percent = round(
-                                min(100.0, max(0.0, (face_similarity + 0.1) / 1.1 * 100)), 1
+                            if face_similarity <= 0.15:
+                                face_accuracy_percent = round(
+                                    max(0.0, (face_similarity + 0.1) * 20), 1
+                                )
+                            elif face_similarity < 0.35:
+                                face_accuracy_percent = round(
+                                    5.0 + (face_similarity - 0.15) / 0.20 * 65.0, 1
+                                )
+                            else:
+                                face_accuracy_percent = round(
+                                    min(99.9, 70.0 + (face_similarity - 0.35) / 0.45 * 29.0), 1
+                                )
+                            platform_slug = reference.get("platform") or ""
+                            threshold = (
+                                0.33
+                                if platform_slug
+                                in {
+                                    "linkedin",
+                                    "github",
+                                    "x",
+                                    "instagram",
+                                    "facebook",
+                                }
+                                else 0.35
                             )
-                            if face_similarity >= 0.363:
+                            if face_similarity >= threshold:
                                 face_matched = True
                     except Exception:
                         pass
@@ -313,7 +461,9 @@ def verify_photo_run(run_dir: Path, *, tamper: bool = False) -> dict[str, Any]:
         ):
             raise ValueError("Evidence artifact inventory is missing")
         for name, expected in artifacts.items():
-            if not re.fullmatch(r"(?:query\.jpg|provider\.json|match-\d{3}\.(?:bin|jpg))", name):
+            if not re.fullmatch(
+                r"(?:query\.jpg|face-crop\.jpg|provider\.json|match-\d{3}\.(?:bin|jpg))", name
+            ):
                 raise ValueError("Invalid artifact name")
             path = run_dir / name
             if path.is_symlink() or not path.is_file() or _digest(path.read_bytes()) != expected:

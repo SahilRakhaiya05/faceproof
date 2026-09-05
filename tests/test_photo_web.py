@@ -210,3 +210,148 @@ def test_photo_copy_storage_is_not_presented_as_face_run_history(tmp_path: Path)
         history = client.get("/api/history")
     assert history.status_code == 200
     assert history.json()["runs"] == []
+
+
+def test_candidate_priority_places_social_and_profiles_before_ecommerce() -> None:
+    from faceproof.photo_web import _candidate_priority
+
+    linkedin_cand = SearchCandidate(
+        provider="serpapi",
+        rank=57,
+        page_url="https://in.linkedin.com/in/test-user",
+        normalized_url="https://in.linkedin.com/in/test-user",
+        title="Test User - Software Engineer | LinkedIn",
+    )
+    github_cand = SearchCandidate(
+        provider="serpapi",
+        rank=80,
+        page_url="https://github.com/test-user",
+        normalized_url="https://github.com/test-user",
+        title="test-user (GitHub)",
+    )
+    myntra_cand = SearchCandidate(
+        provider="serpapi",
+        rank=1,
+        page_url="https://www.myntra.com/blazers/test/buy",
+        normalized_url="https://www.myntra.com/blazers/test/buy",
+        title="Buy Peter England Blazer",
+    )
+    exact_cand = SearchCandidate(
+        provider="serpapi",
+        rank=99,
+        page_url="https://example.com/exact-copy",
+        normalized_url="https://example.com/exact-copy",
+        exact_match=True,
+    )
+
+    candidates = [myntra_cand, linkedin_cand, github_cand, exact_cand]
+    candidates.sort(key=_candidate_priority)
+
+    assert candidates[0].normalized_url == "https://example.com/exact-copy"
+    assert candidates[1].normalized_url in {
+        "https://in.linkedin.com/in/test-user",
+        "https://github.com/test-user",
+    }
+    assert candidates[2].normalized_url in {
+        "https://in.linkedin.com/in/test-user",
+        "https://github.com/test-user",
+    }
+    assert candidates[3].normalized_url == "https://www.myntra.com/blazers/test/buy"
+
+
+def test_face_crop_focus_and_evidence_artifact_verification(tmp_path: Path) -> None:
+    from faceproof.face import (
+        BoundingBox,
+        FaceDetection,
+        FaceEncoding,
+        FaceQualityMetrics,
+        ModelFingerprints,
+    )
+
+    query = _photo()
+    detection = FaceDetection(
+        box=BoundingBox(50, 50, 100, 100),
+        landmarks=((70, 70), (130, 70), (100, 100), (80, 120), (120, 120)),
+        confidence=0.95,
+    )
+    metrics = FaceQualityMetrics(
+        confidence=0.95,
+        face_width_px=100,
+        face_height_px=100,
+        face_area_ratio=0.08,
+        visible_fraction=1.0,
+    )
+    models = ModelFingerprints("yunet", "0" * 64, "sface", "1" * 64)
+    encoding = FaceEncoding(
+        embedding=(1.0,) + (0.0,) * 127,
+        detection=detection,
+        quality=metrics,
+        aligned_size=(112, 112),
+        models=models,
+    )
+
+    def download(_candidate: SearchCandidate, destination: Path, **_kwargs: object) -> CapturedFile:
+        path = destination / "cand.jpg"
+        path.write_bytes(query)
+        return CapturedFile(
+            relative_path=path.name,
+            sha256="0" * 64,
+            byte_size=len(query),
+            media_type="image/jpeg",
+        )
+
+    class _DeepProvider:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            self.search_mode = kwargs.get("search_mode")
+
+        def __enter__(self) -> _DeepProvider:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def search(self, _path: Path, focus_image_path: Path | None = None) -> SearchRun:
+            assert focus_image_path is not None
+            assert focus_image_path.is_file()
+            return SearchRun.create(
+                provider="serpapi",
+                search_id="deep-test-01",
+                candidates=[
+                    SearchCandidate(
+                        provider="serpapi",
+                        rank=1,
+                        page_url="https://in.linkedin.com/in/person",
+                        normalized_url="https://in.linkedin.com/in/person",
+                        title="Person Profile | LinkedIn",
+                        image_url="https://media.licdn.com/dms/image/avatar.jpg",
+                    )
+                ],
+                raw_response={},
+                live=True,
+                provider_mode="no-cache",
+                search_types=["exact_matches", "visual_matches"],
+            )
+
+    run_dir = tmp_path / "evidence" / "run-deep"
+    result = run_photo_search(
+        query,
+        "f" * 64,
+        run_dir,
+        _settings(tmp_path),
+        lambda _msg: None,
+        provider_factory=_DeepProvider,
+        download=download,
+        scan=lambda _path, _settings: {
+            "status": "encoded-locally",
+            "dimensions": 128,
+            "used_for_search_or_matching": True,
+            "embedding_saved": False,
+            "_encoding": encoding,
+        },
+    )
+
+    assert result["status"] == "recorded"
+    assert (run_dir / "face-crop.jpg").is_file()
+    manifest = json.loads((run_dir / "manifest.json").read_bytes())
+    assert "face-crop.jpg" in manifest["artifacts"]
+    assert verify_photo_run(run_dir)["passed"] is True

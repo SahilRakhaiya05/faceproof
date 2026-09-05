@@ -301,3 +301,28 @@ def test_backend_has_friendly_error_when_opencv_is_missing(
 
     with pytest.raises(FaceDependencyError, match="opencv-python-headless"):
         backend.load()
+
+
+def test_backend_encode_faces_permissive_empty_when_no_detections(tmp_path: Path) -> None:
+    detector = tmp_path / "yunet.onnx"
+    recognizer = tmp_path / "sface.onnx"
+    detector.write_bytes(b"detector")
+    recognizer.write_bytes(b"recognizer")
+    backend = OpenCVFaceBackend(detector, recognizer)
+    backend._ensure_loaded = lambda: None
+    backend._coerce_image = lambda img: img
+    backend._detect_prepared = lambda img: ()
+    assert backend.encode_faces_permissive(b"img") == ()
+
+
+def test_backend_encode_primary_face_raises_when_no_face(tmp_path: Path) -> None:
+    detector = tmp_path / "yunet.onnx"
+    recognizer = tmp_path / "sface.onnx"
+    detector.write_bytes(b"detector")
+    recognizer.write_bytes(b"recognizer")
+    backend = OpenCVFaceBackend(detector, recognizer)
+    backend._ensure_loaded = lambda: None
+    backend._coerce_image = lambda img: img
+    backend._detect_prepared = lambda img: ()
+    with pytest.raises(NoFaceError, match="no face detected"):
+        backend.encode_primary_face(b"img")

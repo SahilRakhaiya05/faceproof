@@ -893,6 +893,56 @@ class OpenCVFaceBackend:
                 raise FaceQualityError(first_issues, first_metrics)
             return tuple(encodings)
 
+    def encode_faces_permissive(
+        self,
+        image: Any,
+        *,
+        min_confidence: float = 0.50,
+    ) -> tuple[FaceEncoding, ...]:
+        """Encode faces in a candidate image without rejecting lower-resolution web thumbnails.
+
+        Used for candidate avatars and search results where faces may be smaller or compressed,
+        but SFace can still extract accurate discriminative embeddings.
+        """
+        with self._lock:
+            prepared = self._coerce_image(image)
+            detections = self._detect_prepared(prepared)
+            if not detections:
+                return ()
+            encodings: list[FaceEncoding] = []
+            for detection in detections:
+                if detection.confidence < min_confidence:
+                    continue
+                try:
+                    metrics = self._measure_quality(prepared, detection)
+                    encodings.append(self._encode_detection(prepared, detection, metrics))
+                except Exception:
+                    continue
+            return tuple(encodings)
+
+    def encode_primary_face(
+        self,
+        image: Any,
+        *,
+        min_confidence: float = 0.50,
+    ) -> FaceEncoding:
+        """Encode the primary (largest/most prominent) detected face in an image.
+
+        Useful when an uploaded photo has a smaller face or casual crop that would fail
+        strict studio quality thresholds.
+        """
+        with self._lock:
+            prepared = self._coerce_image(image)
+            detections = self._detect_prepared(prepared)
+            if not detections:
+                raise NoFaceError("no face detected")
+            usable = [d for d in detections if d.confidence >= min_confidence]
+            if not usable:
+                usable = list(detections)
+            best_detection = max(usable, key=lambda d: d.box.area * d.confidence)
+            metrics = self._measure_quality(prepared, best_detection)
+            return self._encode_detection(prepared, best_detection, metrics)
+
     @staticmethod
     def similarity(left: Iterable[float], right: Iterable[float]) -> float:
         return cosine_similarity(left, right)
