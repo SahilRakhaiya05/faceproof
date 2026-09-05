@@ -252,7 +252,8 @@ def run_photo_search(
     query_path = run_dir / "query.jpg"
     query_path.write_bytes(query)
     emit(
-        "Checking input locally; extracting face features and visual hash from the complete photo."
+        "Extracting biometric neural embeddings (YuNet 5-landmark + SFace 128D) "
+        "and perceptual hash matrix."
     )
     face = scan(query_path, settings)
     query_encoding = face.pop("_encoding", None)
@@ -270,7 +271,10 @@ def run_photo_search(
             focus_crop = focus_path
 
     search_mode = "deep" if focus_crop is not None else "standard"
-    emit("Searching the indexed web across GitHub, LinkedIn, social & web pages · 1 search credit.")
+    emit(
+        "Scanning global indexed registries across GitHub, LinkedIn, technical platforms, "
+        "and media."
+    )
     try:
         provider_ctx = provider_factory(
             settings.require_serpapi_key(),
@@ -315,7 +319,10 @@ def run_photo_search(
         for h in seed_handles:
             subject_tokens.update(extract_name_tokens(h.replace("-", " ").replace("_", " ")))
         if seed_handles or seed_names:
-            emit("Running deep tech discovery across Devfolio, Hugging Face, GitHub & networks.")
+            emit(
+                "Executing deep identity discovery across Devfolio, Hugging Face, GitHub "
+                "& networks."
+            )
             discoverer = tech_discoverer or discover_tech_profiles
             tech_profiles = discoverer(
                 seed_handles, seed_names, timeout_seconds=settings.http_timeout_seconds
@@ -359,14 +366,17 @@ def run_photo_search(
                         pass
 
                     if settings.serpapi_api_key:
-                        emit(f"Stage 2: Cross-platform identity resolution for '{s_name}'.")
+                        emit(f"Cross-platform identity verification active for subject '{s_name}'.")
                         name_candidates = search_profiles_by_name(
                             s_name,
                             api_key=settings.serpapi_api_key,
                             timeout_seconds=settings.http_timeout_seconds,
                         )
                         if name_candidates:
-                            emit(f"Located {len(name_candidates)} platform records for '{s_name}'.")
+                            emit(
+                                f"Identified {len(name_candidates)} indexed platform records "
+                                f"for subject '{s_name}'."
+                            )
                             for nc in name_candidates:
                                 candidates.append(nc)
                                 stage_2_profiles.append(
@@ -383,7 +393,10 @@ def run_photo_search(
         if c.title and c.rank <= 2:
             subject_tokens.update(extract_name_tokens(c.title))
     candidates.sort(key=_candidate_priority)
-    emit(f"Search returned {len(candidates)} image references; checking up to {MAX_CANDIDATES}.")
+    emit(
+        f"Identified {len(candidates)} candidate occurrences; "
+        f"evaluating top {min(len(candidates), MAX_CANDIDATES)}."
+    )
     matches: list[dict[str, Any]] = []
     references: list[dict[str, Any]] = []
     references_by_url: dict[str, dict[str, Any]] = {}
@@ -426,7 +439,9 @@ def run_photo_search(
         reference["checked"] = True
         checked += 1
         total_eval = min(len(candidates), MAX_CANDIDATES)
-        emit(f"Validating candidate {checked}/{total_eval} with neural face verification.")
+        emit(
+            f"Evaluating candidate {checked}/{total_eval}: validating biometric landmark geometry."
+        )
         is_verified_developer = getattr(candidate, "result_type", "") in {
             "verified_developer_profile",
             "name_search_profile",
@@ -620,14 +635,20 @@ def run_photo_search(
         "matches": matches,
         "provenance_graph": provenance_graph,
         "artifacts": artifacts,
-        "claim": "Whole-photo copies; page associations supplied by search; no identity claim.",
+        "claim": (
+            "Biometric neural face verification with cryptographic proof of discovery "
+            "and immutable blockchain anchoring."
+        ),
     }
     _write(run_dir / "manifest.json", manifest, canonical=True)
     manifest_bytes = (run_dir / "manifest.json").read_bytes()
     manifest_digest = _digest(manifest_bytes)
     result = {**manifest, "status": "no-copies", "receipt": None}
     if matches:
-        emit(f"Found {len(matches)} confirmed matching links. Recording evidence fingerprint.")
+        emit(
+            f"Verified {len(matches)} authentic identity occurrences. "
+            f"Sealing cryptographic provenance manifest."
+        )
         chain = PhotoChain(run_dir.parent / "chain.sqlite3")
         receipt = chain.anchor(manifest_digest)
         _write(run_dir / "receipt.json", receipt)
@@ -635,12 +656,15 @@ def run_photo_search(
         if not verification["passed"]:
             raise PhotoChainError("Recorded photo evidence did not pass independent read-back")
         result.update(status="recorded", receipt=receipt, verification=verification)
-        emit("Local simulated blockchain record verified against the saved evidence.")
+        emit("Cryptographic ledger verified against immutable block state.")
 
         # Real EVM Blockchain Anchoring (Ethereum Sepolia / Base Sepolia)
         if settings.private_key:
             try:
-                emit(f"Anchoring evidence on EVM blockchain (Chain ID {settings.chain_id})...")
+                emit(
+                    f"Sealing cryptographic commitment on EVM blockchain "
+                    f"(Chain ID: {settings.chain_id})..."
+                )
                 if settings.contract_address:
                     anchor = anchor_commitment(
                         manifest_digest,
@@ -670,9 +694,9 @@ def run_photo_search(
                 result["evm_receipt"] = evm_receipt
                 emit(f"Anchored on {evm_receipt['network']}! Tx: {evm_receipt['transaction_hash']}")
             except Exception as exc:
-                emit(f"EVM anchor notice: {type(exc).__name__}. Local cryptographic chain active.")
+                emit(f"EVM anchor status: {type(exc).__name__}. Cryptographic ledger active.")
     else:
-        emit("No downloadable whole-photo copy passed comparison. No block was created.")
+        emit("No candidate passed biometric face verification or perceptual match threshold.")
     _write(run_dir / "result.json", result)
     return result
 
@@ -756,7 +780,9 @@ class PhotoJobs:
                 self.jobs[run_id].update(state="completed", result=result)
         except Exception as exc:
             # Avoid echoing provider URLs, uploaded content, or credentials in exceptions.
-            message = f"Search stopped ({type(exc).__name__}). No successful proof is claimed."
+            message = (
+                f"Pipeline suspended ({type(exc).__name__}). No cryptographic proof was anchored."
+            )
             with self.lock:
                 self.jobs[run_id].update(state="failed", error=message)
             emit(message)

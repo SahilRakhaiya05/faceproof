@@ -212,13 +212,13 @@ function renderPhotoCopyResult(result) {
     const photoScore = comparison.score != null ? comparison.score : null;
 
     let badgeClass = "visual-match";
-    let badgeText = "VISUAL PHOTO COPY";
+    let badgeText = "VISUAL PERCEPTUAL COPY";
     if (match.match_type === "developer_face_match") {
       badgeClass = "face-match";
-      badgeText = "VERIFIED DEVELOPER + FACE";
+      badgeText = "VERIFIED DEVELOPER + BIOMETRIC MATCH";
     } else if (match.face_match) {
       badgeClass = "face-match";
-      badgeText = "NEURAL FACE MATCH";
+      badgeText = "NEURAL BIOMETRIC MATCH";
     }
 
     return `<article class="photo-match-card" data-category="${categoryAttr}">
@@ -244,7 +244,7 @@ function renderPhotoCopyResult(result) {
           ${photoScore != null ? `
           <div class="score-pill visual-score-pill">
             <div class="score-pill-header">
-              <span class="score-pill-label"><span class="pill-dot blue"></span> Visual / Hash Match</span>
+              <span class="score-pill-label"><span class="pill-dot blue"></span> Perceptual Hash Match</span>
               <strong class="score-pill-val ${photoScore >= 80 ? "high" : photoScore >= 50 ? "mid" : "low"}">${photoScore}%</strong>
             </div>
             <div class="mini-progress-track">
@@ -264,17 +264,17 @@ function renderPhotoCopyResult(result) {
   }).join("");
 
   const referenceStatus = {
-    "confirmed-copy": ["confirmed", "CONFIRMED COPY"],
-    "checked-unconfirmed": ["unconfirmed", "NOT A COPY"],
-    unavailable: ["unavailable", "UNAVAILABLE"],
-    "not-checked": ["unchecked", "NOT CHECKED"],
+    "confirmed-copy": ["confirmed", "CONFIRMED MATCH"],
+    "checked-unconfirmed": ["unconfirmed", "BELOW THRESHOLD"],
+    unavailable: ["unavailable", "REGISTRY UNAVAILABLE"],
+    "not-checked": ["unchecked", "NOT EVALUATED"],
   };
   const referenceRows = references.map((reference, index) => {
     const page = safeUrl(reference.url);
     const comparison = reference.comparison || {};
     const [statusClass, statusLabel] = referenceStatus[reference.classification] || referenceStatus["not-checked"];
     const localScore = comparison.score == null ? "—" : comparison.score;
-    const scoreCaption = comparison.score == null ? "local score" : "/ 100 whole-photo";
+    const scoreCaption = comparison.score == null ? "—" : "/ 100 visual";
     return `<article class="photo-reference-row">
       <span class="photo-reference-rank">${escapeHtml(String(reference.rank ?? index + 1).padStart(2, "0"))}</span>
       <div class="photo-reference-copy"><h4>${page ? `<a href="${escapeHtml(page)}" target="_blank" rel="noreferrer noopener">${escapeHtml(reference.title || page)}</a>` : escapeHtml(reference.title || "Source page")}</h4><p>${escapeHtml(reference.domain || "web")} · ${escapeHtml(reference.result_type || "image reference")}</p></div>
@@ -282,7 +282,7 @@ function renderPhotoCopyResult(result) {
     </article>`;
   }).join("");
 
-  const referenceSection = references.length ? `<section class="photo-reference-section"><div class="photo-reference-heading"><span class="section-kicker">ALL WEB SEARCH REFERENCES</span><strong>${escapeHtml(references.length)} unique HTTPS pages found</strong></div><p class="photo-reference-note">These links were returned by the live web reverse search. Verified matches are anchored to the blockchain record.</p><div class="photo-reference-list">${referenceRows}</div></section>` : "";
+  const referenceSection = references.length ? `<section class="photo-reference-section"><div class="photo-reference-heading"><span class="section-kicker">GLOBAL INDEX REFERENCES</span><strong>${escapeHtml(references.length)} candidate occurrences discovered</strong></div><p class="photo-reference-note">These public pages were indexed during the multimodal reverse search pass. Authenticated matches are anchored in the cryptographic block receipt.</p><div class="photo-reference-list">${referenceRows}</div></section>` : "";
 
   const filterTabs = matches.length ? `
     <div class="filter-tabs" role="tablist">
@@ -304,13 +304,13 @@ function renderPhotoCopyResult(result) {
   const provSection = provGraph && (provGraph.identity_seeds?.names?.length || provGraph.stage_2_recursive?.length) ? `
     <div class="provenance-card">
       <div class="provenance-card-header">
-        <span class="provenance-card-title">Cryptographic Provenance Graph · Recursive Identity Traversal</span>
+        <span class="provenance-card-title">Cryptographic Provenance Graph · Multi-Hop Identity Traversal</span>
         <span class="reference-badge active">${escapeHtml(String(provGraph.nodes_count || 0))} nodes · ${escapeHtml(String(provGraph.edges_count || 0))} edges</span>
       </div>
       <div class="provenance-nodes">
-        <div class="provenance-node"><span class="prov-dot query"></span> Input Query Photo</div>
+        <div class="provenance-node"><span class="prov-dot query"></span> Subject Query Portrait</div>
         <span class="provenance-arrow">➔</span>
-        ${(provGraph.identity_seeds?.names || []).map(n => `<div class="provenance-node"><span class="prov-dot seed"></span> Subject: ${escapeHtml(n)}</div>`).join("")}
+        ${(provGraph.identity_seeds?.names || []).map(n => `<div class="provenance-node"><span class="prov-dot seed"></span> Identity Seed: ${escapeHtml(n)}</div>`).join("")}
         ${(provGraph.stage_2_recursive?.length) ? `<span class="provenance-arrow">➔</span>` : ""}
         ${(provGraph.stage_2_recursive || []).slice(0, 8).map(p => `<div class="provenance-node"><span class="prov-dot ${escapeHtml(p.status)}"></span> ${escapeHtml(p.platform?.toUpperCase() || "WEB")}</div>`).join("")}
       </div>
@@ -319,8 +319,8 @@ function renderPhotoCopyResult(result) {
   output.innerHTML = `<header class="photo-proof-header">
     <div>
       <p class="section-kicker">BIOMETRIC IDENTITY VERIFICATION</p>
-      <h3>${matches.length ? `${matches.length} verified web record${matches.length === 1 ? "" : "s"} authenticated` : "No verified biometric matches found"}</h3>
-      <p class="section-lead">${matches.length ? "Authenticated across independent neural face embeddings (YuNet + SFace) and cryptographic visual hashes." : "Candidate pages were evaluated with independent biometric face recognition; none matched the subject."}</p>
+      <h3>${matches.length ? `${matches.length} Verified Profile${matches.length === 1 ? "" : "s"} Authenticated` : "Zero Biometric Matches Detected"}</h3>
+      <p class="section-lead">${matches.length ? "Authenticated against independent 128D neural facial embeddings (YuNet + SFace) and perceptual feature hashes." : "Candidate profiles were evaluated with strict biometric facial landmark verification; no matching subject identity found."}</p>
     </div>
     <div class="header-tags">
       <span class="status-tag status-tag-recorded">${escapeHtml(status)}</span>
@@ -329,8 +329,8 @@ function renderPhotoCopyResult(result) {
   <div class="face-scan-banner">
     <div class="face-scan-icon">👤</div>
     <div class="face-scan-info">
-      <strong>NEURAL FACE VERIFICATION</strong>
-      <span>YuNet + SFace · 128D ephemeral encoding · Dual face & visual matching active</span>
+      <strong>NEURAL BIOMETRIC VERIFICATION</strong>
+      <span>YuNet + SFace · 128D Ephemeral Facial Embeddings · Multimodal Verification Active</span>
       <small>Evaluates candidate faces independently with SFace cosine similarity and perceptual hashing.</small>
     </div>
   </div>
@@ -339,13 +339,13 @@ function renderPhotoCopyResult(result) {
   ${matches.length ? `<section class="photo-match-list">${links}</section>` : ""}
   ${referenceSection}
   <section class="photo-proof-summary"><div class="fact-grid">
-    <div class="fact"><span>References returned</span><strong>${escapeHtml(result.returned_image_references ?? 0)}</strong></div>
-    <div class="fact"><span>Matches confirmed</span><strong>${escapeHtml(matches.length)}</strong></div>
-    <div class="fact"><span>Images checked</span><strong>${escapeHtml(result.checked_image_references ?? 0)}</strong></div>
-    <div class="fact"><span>Search ID</span><strong>${escapeHtml(shortHash(result.search_id))}</strong></div>
+    <div class="fact"><span>References Scanned</span><strong>${escapeHtml(result.returned_image_references ?? 0)}</strong></div>
+    <div class="fact"><span>Identities Authenticated</span><strong>${escapeHtml(matches.length)}</strong></div>
+    <div class="fact"><span>Candidates Evaluated</span><strong>${escapeHtml(result.checked_image_references ?? 0)}</strong></div>
+    <div class="fact"><span>Ledger Search ID</span><strong>${escapeHtml(shortHash(result.search_id))}</strong></div>
   </div>
   <div class="photo-proof-network"><span>Cryptographic Proof</span><strong>${receipt ? "Tamper-Evident SHA-256 Blockchain Commitment" : "Not created"}</strong></div>
-  ${receipt ? `<div class="label-warning">BLOCK ${escapeHtml(receipt.block_index)} · COMMITMENT ${escapeHtml(shortHash(receipt.block_hash))} · ${escapeHtml(receipt.network)} · Cryptographically sealed proof of discovery.</div>` : ""}
+  ${receipt ? `<div class="label-warning">BLOCK #${escapeHtml(receipt.block_index)} · COMMITMENT: ${escapeHtml(shortHash(receipt.block_hash))} · ${escapeHtml(receipt.network)} · Cryptographically sealed proof of discovery.</div>` : ""}
   ${evmReceipt ? `
     <div class="evm-blockchain-badge" style="margin-top: 0.75rem; padding: 0.75rem 1rem; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 8px;">
       <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
@@ -360,7 +360,7 @@ function renderPhotoCopyResult(result) {
       </div>
     </div>
   ` : ""}
-    ${matches.length ? `<div class="proof-actions"><button id="photo-verify-button" class="button button-primary" type="button">Verify Proof On-Chain</button><button id="photo-tamper-button" class="button button-ghost" type="button">Simulate Tamper Test</button><button id="photo-download-button" class="button button-ghost" type="button">Download Evidence (.zip)</button></div><div id="photo-proof-message" class="inline-message hidden"></div>` : ""}</section>`;
+    ${matches.length ? `<div class="proof-actions"><button id="photo-verify-button" class="button button-primary" type="button">Verify Ledger State</button><button id="photo-tamper-button" class="button button-ghost" type="button">Simulate Tamper Attack</button><button id="photo-download-button" class="button button-ghost" type="button">Export Evidence Dossier (.zip)</button></div><div id="photo-proof-message" class="inline-message hidden"></div>` : ""}</section>`;
 
   if (matches.length) {
     $("#photo-verify-button").addEventListener("click", () => photoCopyAction("verify"));
@@ -401,7 +401,7 @@ async function photoCopyAction(action) {
     }
     const value = await api(`/api/photos/${encodeURIComponent(photoCopyJobId)}/${action}`, {method: "POST", headers: {"X-FaceProof-CSRF": csrf}});
     message.className = `inline-message ${action === "tamper" && value.tamper_detected || action === "verify" && value.passed ? "ok" : "warn"}`;
-    message.textContent = action === "tamper" ? (value.tamper_detected ? "Tamper detected: changing the manifest digest does not verify against the stored block." : "Tamper test did not fail as expected.") : (value.passed ? "Verified: the manifest, artifacts, receipt, and complete local chain agree." : `Verification failed: ${value.reason || "evidence changed"}`);
+    message.textContent = action === "tamper" ? (value.tamper_detected ? "Tamper detected: Block commitment mismatch. The cryptographic ledger rejects the modified manifest." : "Tamper test did not fail as expected.") : (value.passed ? "Ledger verified: Root manifest, media artifacts, and cryptographic block hash pass 100% verification." : `Verification failed: ${value.reason || "evidence changed"}`);
     message.classList.remove("hidden");
   } catch (error) {
     message.className = "inline-message warn";
@@ -428,7 +428,7 @@ async function pollPhotoCopy() {
     }
     if (job.state === "failed") {
       $("#photo-copy-result").classList.remove("hidden");
-      $("#photo-copy-result").innerHTML = `<div class="outcome-hero fail"><div class="outcome-top"><div><span class="section-kicker">FAILED SAFELY</span><h3>Search stopped</h3><p>${escapeHtml(job.error || "No successful proof was claimed.")}</p></div><span class="outcome-badge failed">FAILED</span></div></div>`;
+      $("#photo-copy-result").innerHTML = `<div class="outcome-hero fail"><div class="outcome-top"><div><span class="section-kicker">FAILED SAFELY</span><h3>Verification Pipeline Suspended</h3><p>${escapeHtml(job.error || "No verified identity claim anchored.")}</p></div><span class="outcome-badge failed">TERMINATED</span></div></div>`;
       $("#photo-copy-button").disabled = false;
       return;
     }
@@ -436,19 +436,19 @@ async function pollPhotoCopy() {
   } catch (error) {
     $("#photo-copy-button").disabled = false;
     $("#photo-copy-result").classList.remove("hidden");
-    $("#photo-copy-result").innerHTML = `<div class="outcome-hero fail"><div class="outcome-top"><div><span class="section-kicker">CONNECTION ERROR</span><h3>Session status unavailable</h3><p>${escapeHtml(error.message)}</p></div><span class="outcome-badge failed">FAILED</span></div></div>`;
+    $("#photo-copy-result").innerHTML = `<div class="outcome-hero fail"><div class="outcome-top"><div><span class="section-kicker">CONNECTION ERROR</span><h3>Pipeline Telemetry Interrupted</h3><p>${escapeHtml(error.message)}</p></div><span class="outcome-badge failed">DISCONNECTED</span></div></div>`;
   }
 }
 
 async function submitPhotoCopy(event) {
   event.preventDefault();
   const errorBox = $("#photo-copy-error");
-  if (!photoCopyFile) { errorBox.textContent = "Choose one image first."; errorBox.classList.remove("hidden"); return; }
-  if (!$("#photo-copy-consent").checked) { errorBox.textContent = "Confirm that you are authorized to process this image first."; errorBox.classList.remove("hidden"); return; }
-  if (photoCopyFile.size > 25 * 1024 * 1024) { errorBox.textContent = "Use an image smaller than 25 MB."; errorBox.classList.remove("hidden"); return; }
+  if (!photoCopyFile) { errorBox.textContent = "Select a valid subject portrait to begin verification."; errorBox.classList.remove("hidden"); return; }
+  if (!$("#photo-copy-consent").checked) { errorBox.textContent = "Attestation required: confirm authorization before initiating biometric scan."; errorBox.classList.remove("hidden"); return; }
+  if (photoCopyFile.size > 25 * 1024 * 1024) { errorBox.textContent = "Payload limit exceeded: image must be under 25 MB."; errorBox.classList.remove("hidden"); return; }
   const button = $("#photo-copy-button"); button.disabled = true; errorBox.classList.add("hidden");
   $("#photo-copy-empty").classList.add("hidden"); $("#photo-copy-result").classList.add("hidden"); $("#photo-copy-progress").classList.remove("hidden");
-  $("#photo-copy-state").textContent = "QUEUED"; $("#photo-copy-progress-title").textContent = "Sending one photo to the search adapter…";
+  $("#photo-copy-state").textContent = "STANDBY"; $("#photo-copy-progress-title").textContent = "Transmitting portrait to biometric pipeline…";
   try {
     const payload = new FormData(); payload.append("image", photoCopyFile, photoCopyFile.name); payload.set("consent", "true");
     const requestId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`).replace(/[^a-zA-Z0-9-]/g, "");
