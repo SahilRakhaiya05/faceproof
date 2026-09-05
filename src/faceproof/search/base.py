@@ -12,6 +12,7 @@ SOCIAL_HOSTS = frozenset(
     {
         "bsky.app",
         "facebook.com",
+        "github.com",
         "instagram.com",
         "linkedin.com",
         "m.facebook.com",
@@ -20,6 +21,7 @@ SOCIAL_HOSTS = frozenset(
         "twitter.com",
         "x.com",
         "www.facebook.com",
+        "www.github.com",
         "www.instagram.com",
         "www.linkedin.com",
         "www.reddit.com",
@@ -33,7 +35,7 @@ SOCIAL_HOSTS = frozenset(
 )
 
 SUPPORTED_PLATFORMS = frozenset(
-    {"bluesky", "facebook", "instagram", "linkedin", "reddit", "tiktok", "x", "youtube"}
+    {"bluesky", "facebook", "github", "instagram", "linkedin", "reddit", "tiktok", "x", "youtube"}
 )
 CAPTURE_CAPABLE_PLATFORMS = frozenset({"bluesky", "reddit", "x", "youtube"})
 PROFILE_LEAD_PLATFORMS = frozenset({"linkedin"})
@@ -236,6 +238,8 @@ def extract_post_id(url: str) -> str | None:
         patterns = (re.compile(r"/(?:i/web/)?status/(\d+)", re.IGNORECASE),)
     elif hostname.endswith("reddit.com"):
         patterns = (re.compile(r"/comments/([^/?#]+)", re.IGNORECASE),)
+    elif hostname.endswith("github.com"):
+        patterns = (re.compile(r"/(?:commit|issues|pull|discussions)/([^/?#]+)", re.IGNORECASE),)
     elif hostname.endswith("instagram.com"):
         patterns = (re.compile(r"/(?:p|reel|tv)/([^/?#]+)", re.IGNORECASE),)
     elif hostname.endswith("tiktok.com"):
@@ -278,6 +282,8 @@ def platform_name(url: str) -> str | None:
     except ValueError:
         return None
     suffixes = (
+        ("github.com", "github"),
+        ("githubusercontent.com", "github"),
         ("linkedin.com", "linkedin"),
         ("instagram.com", "instagram"),
         ("twitter.com", "x"),
@@ -307,6 +313,19 @@ def is_social_profile_url(url: str) -> bool:
     path = parts.path.rstrip("/")
     segments = [segment for segment in path.split("/") if segment]
     platform = platform_name(url)
+    if platform == "github":
+        reserved = {
+            "about",
+            "contact",
+            "explore",
+            "features",
+            "pricing",
+            "security",
+            "settings",
+            "topics",
+            "trending",
+        }
+        return len(segments) == 1 and segments[0].casefold() not in reserved
     if platform == "linkedin":
         return len(segments) == 2 and segments[0].casefold() == "in"
     if platform == "x":
@@ -425,6 +444,79 @@ def filter_profile_candidates(
         result.append(replace(candidate, normalized_url=normalized_url, post_id=None))
         if limit is not None and len(result) >= limit:
             break
+    return result
+
+
+def classify_domain(url: str) -> str:
+    """Return a clean category or platform name for any URL."""
+    plat = platform_name(url)
+    if plat:
+        return plat
+    try:
+        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+        if host.startswith("www."):
+            host = host[4:]
+        return host or "web"
+    except (ValueError, AttributeError):
+        return "web"
+
+
+def filter_all_web_candidates(
+    candidates: list[SearchCandidate] | tuple[SearchCandidate, ...],
+    *,
+    limit: int | None = None,
+    platforms: frozenset[str] | None = None,
+) -> list[SearchCandidate]:
+    """Return all valid HTTPS web candidates (GitHub, LinkedIn, social posts, web pages)
+    that have an associated image or thumbnail for face matching.
+    """
+    if limit is not None and limit <= 0:
+        return []
+    result: list[SearchCandidate] = []
+    seen_urls: set[str] = set()
+    seen_entries: set[tuple[str, str | None]] = set()
+
+    for candidate in sorted(candidates, key=lambda item: item.rank):
+        try:
+            normalized_url = normalize_page_url(candidate.normalized_url)
+        except ValueError:
+            continue
+
+        parts = urlsplit(normalized_url)
+        if parts.scheme != "https" or not parts.netloc:
+            continue
+
+        if not _platform_allowed(normalized_url, platforms):
+            continue
+
+        provider_bound_variant = (
+            candidate.provider == "bluesky-public-api"
+            and isinstance(candidate.provider_item_id, str)
+            and bool(candidate.provider_item_id)
+        ) or (
+            candidate.provider == "serpapi"
+            and isinstance(candidate.provider_item_id, str)
+            and bool(candidate.provider_item_id)
+            and bool(candidate.image_url or candidate.thumbnail_url or candidate.thumbnail_base64)
+        )
+        entry_key = (
+            normalized_url,
+            candidate.provider_item_id if provider_bound_variant else None,
+        )
+        if entry_key in seen_entries:
+            continue
+
+        if normalized_url not in seen_urls:
+            if limit is not None and len(seen_urls) >= limit:
+                continue
+            seen_urls.add(normalized_url)
+        elif not provider_bound_variant:
+            continue
+
+        seen_entries.add(entry_key)
+        post_id = extract_post_id(normalized_url)
+        result.append(replace(candidate, normalized_url=normalized_url, post_id=post_id))
+
     return result
 
 

@@ -105,6 +105,30 @@ days, while its no-retention ZeroTrace mode is Enterprise-only. A ten-minute
 `image_id` expiry is not a promise that every uploaded byte is deleted then.
 Obtain consent for this third-party processing before choosing Lens.
 
+### Quick photo-copy search
+
+The local console also has a one-upload path for the Task 3 “find a real
+matching post” demonstration. It sends the complete, metadata-stripped photo
+to one live Google Lens `all` search, retains every unique HTTPS page reference
+returned by the provider, and checks up to 24 downloadable images as whole
+photographs. The UI labels each retained reference as confirmed, unconfirmed,
+unavailable, or not checked. The matcher reports a 0–100 whole-photo similarity
+index; that number is not an identity probability and the workflow does not
+infer a person or account owner. The checked-image cap means the result does
+not claim to cover every page on the internet.
+
+The form requires one explicit authorization checkbox before it sends the
+metadata-stripped image to SerpApi or runs the local face encoder.
+
+When one or more copies pass, the workflow writes the canonical evidence
+digest to `evidence/.photo-copies/chain.sqlite3`, a local append-only SHA-256
+demonstration chain. The UI can independently re-verify the artifact hashes,
+receipt, and complete chain, run a one-byte tamper check, and export a bundle.
+The local chain is suitable for a screen-recorded demo; it is not a public
+blockchain or a trusted timestamp service. Set `SERPAPI_API_KEY` before using
+the quick path. If no image copy passes, the run stays `no-copies` and no block
+is created.
+
 X, Reddit, YouTube, and Bluesky have supported public post-capture paths and can
 complete the post-validation stage when their public response supplies the
 required permalink and media evidence. LinkedIn, Instagram, Facebook, and
@@ -161,6 +185,11 @@ normal `uv run faceproof doctor` is sufficient before launching it.
 
 ### Local judge console
 
+The console uses a compact terminal workspace with connection diagnostics,
+an event output panel, and a local evidence archive. See the
+[terminal and feasibility review](docs/TERMINAL_REVIEW.md) for the September 5
+repository comparison, verified checks, and remaining live-demo limitations.
+
 Launch the polished local workflow from the repository root:
 
 ```powershell
@@ -172,6 +201,14 @@ Do not proxy it or expose it to a LAN or the public internet. It guides the
 operator through consent, a zero-credit local face preflight, source selection,
 live search, candidate review, evidence verification, download, and tamper
 test.
+
+For the simplest Task 3 demonstration, open **Photo copies** at the top of the
+console and upload one JPEG, PNG, or WebP. With `SERPAPI_API_KEY` configured,
+the app runs one live Google Lens `all` search, shows every unique HTTPS page
+reference returned, compares up to 24 downloadable images as complete photos,
+and anchors only confirmed copies to the local simulated SHA-256 chain. This
+path gives transparent links and scores without claiming that a page belongs
+to the person in the uploaded image.
 
 Anchoring in the console is intentionally a two-pass operation:
 

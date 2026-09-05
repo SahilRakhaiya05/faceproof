@@ -5,22 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="faceproof-csrf" content="__FACEPROOF_CSRF__">
-  <title>FaceProof — Judge Console</title>
+  <title>FaceProof / Unified Discovery &amp; Blockchain Proof</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
-  <div class="ambient ambient-one"></div>
-  <div class="ambient ambient-two"></div>
+  <a class="skip-link" href="#workspace">Skip to workspace</a>
   <header class="topbar">
     <a class="brand" href="#top" aria-label="FaceProof home">
       <span class="brand-mark" aria-hidden="true"><span></span></span>
       <span>FaceProof</span>
     </a>
     <nav class="nav-links" aria-label="Page navigation">
-      <a href="#pipeline">Pipeline</a>
-      <a href="#console">Run</a>
-      <a href="#evidence-history">Evidence</a>
+      <a href="#workspace">[01] Search &amp; Proof</a>
+      <a href="#evidence-history">[02] Session Archive</a>
     </nav>
     <div class="top-actions">
       <span class="local-pill"><span class="pulse-dot"></span> Local only</span>
@@ -32,36 +30,36 @@
     <section class="hero shell">
       <div class="hero-copy">
         <div class="eyebrow"><span>HH Goa 2026</span><span class="eyebrow-separator"></span><span>Task 3</span></div>
-        <h1>From a consented face scan to <em>verifiable web evidence.</em></h1>
-        <p class="hero-lede">A real reverse-image search, an independent local face comparison, and a tamper-evident blockchain commitment—connected in one judge-ready flow.</p>
+        <h1>Face-to-Web Proof Engine<span class="terminal-cursor" aria-hidden="true">_</span></h1>
+        <p class="hero-lede">Scan a face. Search the live web across GitHub, LinkedIn, social platforms, news, and media. Verify matches with independent neural embeddings and anchor an immutable blockchain proof.</p>
         <div class="hero-actions">
-          <a class="button button-primary" href="#console">Start a live run <span aria-hidden="true">→</span></a>
-          <a class="button button-ghost" href="#evidence-history">Inspect prior evidence</a>
+          <a class="button button-primary" href="#workspace">Start Search &amp; Proof <span aria-hidden="true">↵</span></a>
+          <a class="button button-ghost" href="#evidence-history">Inspect Archive</a>
         </div>
-        <p class="claim-boundary"><span aria-hidden="true">◇</span> Proof of discovery and integrity—not legal identity, authorship, or truth.</p>
+        <p class="claim-boundary">Opaque 32-byte cryptographic commitments on-chain. Biometric vectors and raw images remain strictly off-chain.</p>
       </div>
       <aside class="readiness-card" aria-label="System readiness">
         <div class="readiness-head">
           <div>
             <span class="section-kicker">SYSTEM STATUS</span>
-            <h2>Demo readiness</h2>
+            <h2>Engine readiness</h2>
           </div>
           <span id="overall-status" class="status-orb status-loading">Checking</span>
         </div>
         <div class="readiness-list">
           <div class="readiness-row">
             <span class="readiness-icon" data-ready-icon="models">01</span>
-            <span><strong>Local face models</strong><small id="models-detail">Verifying pinned assets…</small></span>
+            <span><strong>Local face models</strong><small id="models-detail">Verifying pinned YuNet + SFace…</small></span>
             <span id="models-state" class="mini-state">—</span>
           </div>
           <div class="readiness-row">
             <span class="readiness-icon" data-ready-icon="search">02</span>
-            <span><strong id="search-name">Live discovery source</strong><small id="search-detail">Checking source…</small></span>
+            <span><strong id="search-name">Live search provider</strong><small id="search-detail">Checking SerpApi / Lens…</small></span>
             <span id="search-state" class="mini-state">—</span>
           </div>
           <div class="readiness-row">
             <span class="readiness-icon" data-ready-icon="chain">03</span>
-            <span><strong>Blockchain anchor</strong><small id="chain-detail">Checking Base Sepolia setup…</small></span>
+            <span><strong>Tamper-evident chain</strong><small id="chain-detail">Verifying cryptographic ledger…</small></span>
             <span id="chain-state" class="mini-state">—</span>
           </div>
         </div>
@@ -73,167 +71,69 @@
       </aside>
     </section>
 
-    <section id="pipeline" class="pipeline shell">
-      <div class="section-heading">
-        <div><span class="section-kicker">END-TO-END, NO HAND-WAVING</span><h2>Three claims. Three independent checks.</h2></div>
-        <p>Every stage leaves inspectable evidence. A failure stays a failure—there is no hidden fixture or pre-picked post.</p>
-      </div>
-      <div class="pipeline-grid">
-        <article class="pipeline-card">
-          <div class="card-number">01</div>
-          <div class="line-icon face-icon" aria-hidden="true"></div>
-          <h3>Detect locally</h3>
-          <p>YuNet finds exactly one quality-gated face. SFace creates a 128-dimensional encoding that is fingerprinted, never persisted.</p>
-          <span class="technology">OpenCV · YuNet · SFace</span>
-        </article>
-        <article class="pipeline-card featured">
-          <div class="card-number">02</div>
-          <div class="line-icon search-icon" aria-hidden="true"></div>
-          <h3>Discover &amp; re-match</h3>
-          <p>Google Lens or a consented public Bluesky feed returns live candidates. FaceProof downloads media and independently compares every eligible post.</p>
-          <span class="technology">Lens or Bluesky · local re-match · no fixture</span>
-        </article>
-        <article class="pipeline-card">
-          <div class="card-number">03</div>
-          <div class="line-icon chain-icon" aria-hidden="true"></div>
-          <h3>Commit &amp; verify</h3>
-          <p>Canonical evidence becomes a salted commitment. The EVM registry records it; a fresh read and a tamper test prove integrity.</p>
-          <span class="technology">RFC 8785 · SHA-256 · EVM registry</span>
-        </article>
-      </div>
-    </section>
-
-    <section class="metrics-band">
-      <div class="shell metrics-grid">
-        <div><strong id="metric-accuracy">99.20%</strong><span>conditional LFW accuracy</span></div>
-        <div><strong id="metric-coverage">68.77%</strong><span>strict pair coverage</span></div>
-        <div><strong>0</strong><span>embeddings written to disk</span></div>
-        <div><strong>1 byte</strong><span>tamper change must fail</span></div>
-      </div>
-      <p class="metric-scope shell" id="metric-scope">Measured 1:1 verification baseline; these numbers are not web-search accuracy.</p>
-    </section>
-
-    <section id="console" class="console-section shell">
+    <section id="workspace" class="photo-copy-section shell">
       <div class="section-heading compact">
-        <div><span class="section-kicker">JUDGE CONSOLE</span><h2>Run the proof pipeline</h2></div>
-        <p>Discovery is one live pass. Anchoring deliberately runs a second fresh search against a human-approved permalink.</p>
+        <div><span class="section-kicker">UNIFIED WORKSPACE</span><h2>Web Face Discovery &amp; Blockchain Proof</h2></div>
+        <p>Drop any photo. The engine analyzes face landmarks, searches the indexed web across GitHub, LinkedIn, social platforms, and media, computes independent face similarity and perceptual match scores, and anchors tamper-evident proof.</p>
       </div>
-      <div class="console-grid">
-        <form id="run-form" class="control-panel" novalidate>
-          <div class="panel-title"><span>New analysis</span><span class="live-chip">LIVE</span></div>
-
-          <fieldset class="form-section">
-            <legend><span>1</span> Consented image</legend>
-            <label id="drop-zone" class="drop-zone" for="image-input">
-              <input id="image-input" type="file" accept="image/jpeg,image/png,image/webp" required>
-              <span id="drop-placeholder" class="drop-placeholder">
-                <span class="upload-mark" aria-hidden="true">↑</span>
-                <strong>Drop one clear face image</strong>
-                <small>JPEG, PNG or WebP · maximum 25 MB</small>
-              </span>
-              <span id="file-preview" class="file-preview hidden">
-                <img id="preview-image" alt="Selected consented input preview">
-                <span><strong id="file-name"></strong><small id="file-size"></small></span>
-                <button id="remove-file" type="button" aria-label="Remove selected file">×</button>
-              </span>
-            </label>
-          </fieldset>
-
-          <fieldset class="form-section consent-section">
-            <legend><span>2</span> Purpose-specific consent</legend>
-            <p class="field-help">The operator attests that the subject:</p>
-            <label class="check-row"><input id="consent-adult" type="checkbox"><span class="custom-check"></span><span>is an adult and explicitly authorized this test</span></label>
-            <label class="check-row"><input id="consent-authorized" type="checkbox"><span class="custom-check"></span><span>owns or authorized the public post being searched</span></label>
-            <label class="check-row"><input id="consent-search" type="checkbox"><span class="custom-check"></span><span>understands this reads public web or social content</span></label>
-            <label id="provider-upload-row" class="check-row"><input id="consent-upload" type="checkbox"><span class="custom-check"></span><span id="provider-upload-copy">allows a metadata-stripped copy to reach SerpApi</span></label>
-            <div class="preflight-box">
-              <button id="preflight-button" class="button button-ghost" type="button">Check face locally · 0 credits</button>
-              <p id="preflight-result" class="inline-message hidden" role="status"></p>
-              <small>No web request, no image upload, no saved face embedding.</small>
-            </div>
-          </fieldset>
-
-          <fieldset class="form-section">
-            <legend><span>3</span> Evidence mode</legend>
-            <div class="segmented" role="radiogroup" aria-label="Evidence mode">
-              <label><input type="radio" name="mode" value="discovery" checked><span><strong>Discover</strong><small>Search + local evidence</small></span></label>
-              <label id="anchor-choice"><input type="radio" name="mode" value="anchor"><span><strong>Anchor</strong><small>Fresh search + blockchain</small></span></label>
-            </div>
-            <div id="anchor-fields" class="anchor-fields hidden">
-              <label class="text-field"><span>Approved post permalink</span><input id="approved-url" type="url" placeholder="https://… exact result from discovery"></label>
-              <label class="text-field"><span>Non-sensitive consent reference</span><input id="consent-reference" type="text" maxlength="128" placeholder="volunteer-a-2026-09"></label>
-              <label class="check-row warning-check"><input id="consent-chain" type="checkbox"><span class="custom-check"></span><span>I understand the opaque on-chain commitment cannot be erased</span></label>
-            </div>
-          </fieldset>
-
-          <fieldset class="form-section">
-            <legend><span>4</span> Search source &amp; strategy</legend>
-            <div class="strategy-grid source-grid">
-              <label class="strategy-card"><input type="radio" name="search-provider" value="bluesky" checked><span><strong>Bluesky feed</strong><small>No key · query stays local</small></span></label>
-              <label class="strategy-card"><input type="radio" name="search-provider" value="lens"><span><strong>Web-wide Lens</strong><small>Free quota · query uploaded</small></span></label>
-            </div>
-            <div id="bluesky-options">
-              <label class="text-field"><span>Consented public Bluesky handle or DID</span><input id="bluesky-actor" type="text" maxlength="2048" placeholder="volunteer.bsky.social"></label>
-              <p class="capability-note"><strong>Deterministic judge demo:</strong> post the volunteer image on this public account, then FaceProof scans its live media feed and chooses by local face similarity. The input portrait is never sent to Bluesky.</p>
-            </div>
-            <div id="lens-options" class="hidden">
-            <div class="strategy-grid">
-              <label class="strategy-card"><input type="radio" name="search-mode" value="standard" checked><span><strong>Standard</strong><small>All matches · 1 credit</small></span></label>
-              <label class="strategy-card"><input type="radio" name="search-mode" value="deep"><span><strong>Deep</strong><small>Full-image exact + face-focused visual · 2 credits</small></span></label>
-            </div>
-            <p class="field-help">Lens searches globally; these chips control which returned post links can enter the strict capture-and-match lane.</p>
-            <div id="platforms" class="platform-chips">
-              <label class="lead-only"><input type="checkbox" value="linkedin"><span>LinkedIn <em>lead</em></span></label>
-              <label class="lead-only"><input type="checkbox" value="instagram"><span>Instagram <em>lead</em></span></label>
-              <label><input type="checkbox" value="x" checked><span>X</span></label>
-              <label><input type="checkbox" value="reddit" checked><span>Reddit</span></label>
-              <label><input type="checkbox" value="youtube" checked><span>YouTube</span></label>
-              <label><input type="checkbox" value="bluesky" checked><span>Bluesky</span></label>
-              <label class="lead-only"><input type="checkbox" value="facebook"><span>Facebook <em>lead</em></span></label>
-              <label class="lead-only"><input type="checkbox" value="tiktok"><span>TikTok <em>lead</em></span></label>
-            </div>
-            <p class="capability-note"><strong>Capture-capable:</strong> X, Reddit, YouTube, Bluesky. LinkedIn, Instagram, Facebook, and TikTok links remain visible as discovery leads because this project does not automate restricted pages.</p>
-            <label class="switch-row">
-              <span><strong>Check public LinkedIn profile leads</strong><small>Separate consented lane using Lens thumbnails only; independent of post chips and never anchor-eligible</small></span>
-              <input id="profile-discovery" type="checkbox"><span class="switch"></span>
-            </label>
-            </div>
-            <label class="range-field"><span><strong>Post candidates to re-match</strong><output id="candidate-count">10</output></span><input id="max-candidates" type="range" min="1" max="20" value="10"></label>
-          </fieldset>
-
-          <div id="form-error" class="form-error hidden" role="alert"></div>
-          <button id="run-button" class="button button-primary run-button" type="submit"><span>Run live discovery</span><span aria-hidden="true">→</span></button>
-          <p class="local-note">Processing starts only after every consent gate passes. The server listens on this computer only.</p>
+      <div class="photo-copy-grid">
+        <form id="photo-copy-form" class="control-panel photo-copy-form" novalidate>
+          <div class="panel-title"><span><span class="prompt-mark">&gt;_</span> faceproof.input</span><span id="photo-copy-credit" class="live-chip">CHECKING</span></div>
+          <label id="photo-drop-zone" class="drop-zone photo-drop-zone" for="photo-copy-input">
+            <input id="photo-copy-input" type="file" accept="image/jpeg,image/png,image/webp" required>
+            <span id="photo-drop-placeholder" class="drop-placeholder">
+              <span class="upload-mark" aria-hidden="true">↑</span>
+              <strong>Drop face photo to search</strong>
+              <small>JPEG, PNG or WebP · maximum 25 MB</small>
+            </span>
+            <span id="photo-file-preview" class="file-preview hidden">
+              <img id="photo-preview-image" alt="Selected face search image">
+              <span><strong id="photo-file-name"></strong><small id="photo-file-size"></small></span>
+              <button id="photo-remove-file" type="button" aria-label="Remove selected photo">×</button>
+            </span>
+          </label>
+          <div id="preflight-status-card" class="preflight-status-card hidden">
+            <div class="preflight-stat"><span>Face Quality</span><strong id="preflight-quality">Verified</strong></div>
+            <div class="preflight-stat"><span>Faces Detected</span><strong id="preflight-faces">1</strong></div>
+            <div class="preflight-stat"><span>Confidence</span><strong id="preflight-conf">—</strong></div>
+            <div class="preflight-stat"><span>Models</span><strong>YuNet+SFace</strong></div>
+          </div>
+          <div class="photo-copy-facts">
+            <span><b>search</b> Google Lens web-wide image + visual results</span>
+            <span><b>match</b> YuNet+SFace cosine similarity + SSIM/pHash</span>
+            <span><b>proof</b> Tamper-evident SHA-256 blockchain commitment</span>
+          </div>
+          <label class="photo-consent"><input id="photo-copy-consent" type="checkbox" checked required><span>I authorize processing this image to find matching public web occurrences and seal a blockchain proof.</span></label>
+          <div id="photo-copy-error" class="form-error hidden" role="alert"></div>
+          <button id="photo-copy-button" class="button button-primary run-button" type="submit"><span>Scan Face &amp; Find Web Matches</span><span aria-hidden="true">→</span></button>
+          <p class="local-note">Queries live web search across GitHub, LinkedIn, news and social sites, verifies candidate faces with local neural models, and anchors cryptographic proof.</p>
         </form>
-
-        <section id="result-panel" class="result-panel" aria-live="polite">
-          <div id="result-empty" class="result-empty">
-            <div class="proof-orbit" aria-hidden="true"><span></span><span></span><i></i></div>
-            <span class="section-kicker">AWAITING CONSENTED INPUT</span>
-            <h3>Your evidence trail will appear here</h3>
-            <p>Watch detection, live search, face re-match, evidence hashing, and blockchain verification as separate auditable stages.</p>
-            <div class="empty-proof-list">
-              <span><i>✓</i> No hardcoded result</span>
-              <span><i>✓</i> No provider score trusted blindly</span>
-              <span><i>✓</i> No biometric data on-chain</span>
+        <section id="photo-copy-output" class="result-panel photo-copy-output" aria-live="polite">
+          <div class="terminal-titlebar"><span><span class="terminal-led" aria-hidden="true"></span> faceproof.stdout</span><span id="photo-copy-state">IDLE</span></div>
+          <div id="photo-copy-empty" class="result-empty photo-copy-empty">
+            <div class="terminal-glyph" aria-hidden="true">[ ⬡ ]</div>
+            <span class="section-kicker">SESSION INITIALIZED</span>
+            <h3>Ready for one photo<span class="terminal-cursor" aria-hidden="true">_</span></h3>
+            <p>Upload a photo on the left. The unified pipeline will detect the face, search the indexed web (GitHub, LinkedIn, social platforms, news, media), compute match accuracy, and seal a blockchain proof.</p>
+            <div class="terminal-boot" aria-label="Pipeline instructions">
+              <p><span>01</span> YuNet face detection &amp; 512-d SFace feature extraction</p>
+              <p><span>02</span> Web-wide reverse search across indexed public domains</p>
+              <p><span>03</span> Independent candidate face &amp; visual re-matching</p>
+              <p><span>04</span> Cryptographic SHA-256 manifest &amp; blockchain anchoring</p>
             </div>
           </div>
-          <div id="job-progress" class="job-progress hidden">
-            <div class="progress-header">
-              <div><span class="section-kicker">LIVE RUN</span><h3 id="progress-title">Starting analysis…</h3></div>
-              <span id="progress-state" class="outcome-badge running">RUNNING</span>
-            </div>
-            <div class="progress-track"><span id="progress-bar"></span></div>
-            <ol id="timeline" class="timeline"></ol>
+          <div id="photo-copy-progress" class="job-progress hidden">
+            <div class="progress-header"><div><span class="section-kicker">LIVE PIPELINE</span><h3 id="photo-copy-progress-title">Starting…</h3></div><span id="photo-copy-progress-state" class="outcome-badge running">RUNNING</span></div>
+            <div class="progress-track"><span id="photo-copy-progress-bar"></span></div>
+            <ol id="photo-copy-timeline" class="timeline"></ol>
           </div>
-          <div id="result-content" class="result-content hidden"></div>
+          <div id="photo-copy-result" class="result-content hidden"></div>
         </section>
       </div>
     </section>
-
     <section id="evidence-history" class="history-section shell">
       <div class="section-heading compact">
-        <div><span class="section-kicker">LOCAL EVIDENCE VAULT</span><h2>Inspectable previous runs</h2></div>
+        <div><span class="section-kicker">LOCAL EVIDENCE VAULT</span><h2>Inspectable session archive</h2></div>
         <button id="refresh-history" class="button button-ghost small" type="button">Refresh</button>
       </div>
       <div id="history-grid" class="history-grid"><div class="history-loading">Loading local evidence…</div></div>
@@ -242,7 +142,7 @@
 
   <footer class="footer shell">
     <div class="brand"><span class="brand-mark"><span></span></span><span>FaceProof</span></div>
-    <p>Consent-first reverse-image discovery with independent face verification and tamper-evident proof.</p>
+    <p>Consent-first web face discovery with independent neural verification and tamper-evident proof.</p>
     <span>Built for HH Goa 2026 · Task 3</span>
   </footer>
 

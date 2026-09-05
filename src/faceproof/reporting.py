@@ -369,7 +369,7 @@ def list_run_summaries(output_dir: Path, *, limit: int = 20) -> list[dict[str, A
     if not root.is_dir():
         return []
     directories = sorted(
-        (path for path in root.iterdir() if path.is_dir()),
+        (path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")),
         key=lambda path: path.name,
         reverse=True,
     )

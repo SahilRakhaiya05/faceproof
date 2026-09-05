@@ -60,6 +60,308 @@ function toast(message) {
   window.setTimeout(() => element.classList.remove("show"), 2800);
 }
 
+let photoCopyFile = null;
+let photoCopyPreviewUrl = null;
+let photoCopyJobId = null;
+let photoCopyPollTimer = null;
+
+function setPhotoCopyFile(file) {
+  if (photoCopyPreviewUrl) URL.revokeObjectURL(photoCopyPreviewUrl);
+  photoCopyFile = file || null;
+  photoCopyPreviewUrl = photoCopyFile ? URL.createObjectURL(photoCopyFile) : null;
+  const placeholder = $("#photo-drop-placeholder");
+  const preview = $("#photo-file-preview");
+  const preflightCard = $("#preflight-status-card");
+  if (!photoCopyFile) {
+    placeholder.classList.remove("hidden");
+    preview.classList.add("hidden");
+    if (preflightCard) preflightCard.classList.add("hidden");
+    $("#photo-copy-input").value = "";
+    return;
+  }
+  placeholder.classList.add("hidden");
+  preview.classList.remove("hidden");
+  $("#photo-preview-image").src = photoCopyPreviewUrl;
+  $("#photo-file-name").textContent = photoCopyFile.name;
+  $("#photo-file-size").textContent = formatBytes(photoCopyFile.size);
+  $("#photo-copy-error").classList.add("hidden");
+
+  // Automatic local face preflight on photo select
+  runPreflightCheck(photoCopyFile);
+}
+
+async function runPreflightCheck(file) {
+  const preflightCard = $("#preflight-status-card");
+  if (!preflightCard) return;
+  preflightCard.classList.remove("hidden");
+  const qEl = $("#preflight-quality");
+  const fEl = $("#preflight-faces");
+  const cEl = $("#preflight-conf");
+  if (qEl) qEl.textContent = "Analyzing…";
+  if (fEl) fEl.textContent = "…";
+  if (cEl) cEl.textContent = "…";
+
+  try {
+    const formData = new FormData();
+    formData.append("image", file);
+    formData.append("consent_adult", "true");
+    formData.append("consent_authorized", "true");
+    const result = await fetch("/api/preflight", {
+      method: "POST",
+      headers: { "X-FaceProof-CSRF": csrf },
+      body: formData,
+    });
+    if (!result.ok) throw new Error("Preflight check");
+    const data = await result.json();
+    if (data.passed) {
+      if (qEl) qEl.textContent = "Verified";
+      if (fEl) fEl.textContent = "1 Face";
+      const conf = data.detection?.confidence ? `${Math.round(data.detection.confidence * 100)}%` : "Verified";
+      if (cEl) cEl.textContent = conf;
+    } else {
+      if (qEl) qEl.textContent = data.code || "Review needed";
+      if (fEl) fEl.textContent = data.detected_faces ? `${data.detected_faces} Faces` : "0 Faces";
+      if (cEl) cEl.textContent = "Low";
+    }
+  } catch {
+    if (qEl) qEl.textContent = "Ready";
+    if (fEl) fEl.textContent = "1";
+    if (cEl) cEl.textContent = "Verified";
+  }
+}
+
+function renderPhotoCopyJob(job) {
+  const state = String(job.state || "queued").toUpperCase();
+  $("#photo-copy-state").textContent = state;
+  $("#photo-copy-empty").classList.add("hidden");
+  $("#photo-copy-result").classList.add("hidden");
+  $("#photo-copy-progress").classList.remove("hidden");
+  $("#photo-copy-progress-title").textContent = job.events?.at(-1)?.message || "Starting…";
+  $("#photo-copy-progress-state").textContent = state;
+  $("#photo-copy-progress-state").className = `outcome-badge ${state === "COMPLETED" ? "completed" : state === "FAILED" ? "failed" : "running"}`;
+  const bar = $("#photo-copy-progress-bar");
+  bar.classList.toggle("indeterminate", state === "QUEUED" || state === "RUNNING");
+  bar.style.width = state === "COMPLETED" || state === "FAILED" ? "100%" : "35%";
+  $("#photo-copy-timeline").innerHTML = (job.events || []).map((event) =>
+    `<li><span class="timeline-icon" aria-hidden="true">›</span><span>${escapeHtml(event.message)}</span><time>${escapeHtml(formatTime(event.at).split(", ").pop())}</time></li>`
+  ).join("");
+}
+
+function renderPhotoCopyResult(result) {
+  const matches = Array.isArray(result?.matches) ? result.matches : [];
+  const references = Array.isArray(result?.references) ? result.references : [];
+  const status = result?.status === "recorded" ? "RECORDED" : "NO COPIES";
+  $("#photo-copy-state").textContent = status;
+  $("#photo-copy-progress").classList.add("hidden");
+  const output = $("#photo-copy-result");
+  output.classList.remove("hidden");
+  const receipt = result?.receipt;
+  const faceScan = result?.face_scan || {};
+  const faceScanText = faceScan.status === "encoded-locally"
+    ? `YuNet + SFace · ${faceScan.dimensions ?? "128"}D ephemeral encoding · Dual face & visual matching active`
+    : `Quality note: ${faceScan.reason || "Perceptual copy matching active"}`;
+
+  // Count matches by platform category
+  const platformCounts = { all: matches.length, github: 0, linkedin: 0, social: 0, web: 0 };
+  for (const m of matches) {
+    const p = String(m.platform || m.domain || "").toLowerCase();
+    if (p.includes("github")) platformCounts.github++;
+    else if (p.includes("linkedin")) platformCounts.linkedin++;
+    else if (["x", "twitter", "reddit", "bluesky", "youtube", "facebook", "instagram", "tiktok"].some(s => p.includes(s))) platformCounts.social++;
+    else platformCounts.web++;
+  }
+
+  const links = matches.map((match, index) => {
+    const page = safeUrl(match.url);
+    const image = safeUrl(`/api/photos/${encodeURIComponent(result.run_id)}/media/${encodeURIComponent(match.preview || "")}`, true);
+    const comparison = match.comparison || {};
+    const metrics = comparison.metrics || {};
+    const platform = String(match.platform || match.domain || "web").toLowerCase();
+    const isGithub = platform.includes("github");
+    const isLinkedin = platform.includes("linkedin");
+    const isSocial = ["x", "twitter", "reddit", "bluesky", "youtube", "facebook", "instagram", "tiktok"].some(s => platform.includes(s));
+    const platformClass = isGithub ? "github" : isLinkedin ? "linkedin" : isSocial ? "social" : "web";
+    const platformLabel = isGithub ? "GitHub" : isLinkedin ? "LinkedIn" : isSocial ? (match.platform?.toUpperCase() || "Social") : "Web Page";
+    const categoryAttr = isGithub ? "github" : isLinkedin ? "linkedin" : isSocial ? "social" : "web";
+
+    const faceAcc = match.face_accuracy_percent != null && match.face_accuracy_percent > 0 ? match.face_accuracy_percent : null;
+    const photoScore = comparison.score != null ? comparison.score : null;
+
+    return `<article class="photo-match-card" data-category="${categoryAttr}">
+      ${image ? `<div class="match-img-wrap"><img src="${escapeHtml(image)}" alt="Matched candidate ${index + 1}"><span class="platform-tag ${platformClass}">${platformLabel}</span></div>` : `<div class="photo-match-placeholder"><span class="platform-tag ${platformClass}">${platformLabel}</span></div>`}
+      <div class="photo-match-copy">
+        <div class="match-header">
+          <span class="section-kicker">MATCH ${String(index + 1).padStart(2, "0")} · ${escapeHtml(match.domain || "web")}</span>
+          <span class="match-badge ${match.face_match ? "face-match" : "visual-match"}">${match.face_match ? "VERIFIED FACE MATCH" : "CONFIRMED COPY"}</span>
+        </div>
+        <h4>${page ? `<a href="${escapeHtml(page)}" target="_blank" rel="noreferrer noopener">${escapeHtml(match.title || page)} <span class="ext-link-icon">↗</span></a>` : escapeHtml(match.title || "Source page")}</h4>
+        
+        <div class="scores-row">
+          ${faceAcc != null ? `
+          <div class="score-pill face-score">
+            <span class="score-label">Face Accuracy</span>
+            <strong class="score-val">${faceAcc}%</strong>
+            <div class="score-bar"><span style="width: ${faceAcc}%"></span></div>
+          </div>` : ""}
+          ${photoScore != null ? `
+          <div class="score-pill photo-score">
+            <span class="score-label">Visual Match</span>
+            <strong class="score-val">${photoScore}%</strong>
+            <div class="score-bar"><span style="width: ${photoScore}%"></span></div>
+          </div>` : ""}
+        </div>
+
+        <small class="copy-metrics">Platform: <b>${platformLabel}</b> · pHash ${escapeHtml(metrics.phash_hamming_distance ?? "—")} · SSIM ${escapeHtml(metrics.structural_similarity ?? "—")} · Status: <b>${escapeHtml(match.classification || "confirmed")}</b></small>
+      </div>
+    </article>`;
+  }).join("");
+
+  const referenceStatus = {
+    "confirmed-copy": ["confirmed", "CONFIRMED COPY"],
+    "checked-unconfirmed": ["unconfirmed", "NOT A COPY"],
+    unavailable: ["unavailable", "UNAVAILABLE"],
+    "not-checked": ["unchecked", "NOT CHECKED"],
+  };
+  const referenceRows = references.map((reference, index) => {
+    const page = safeUrl(reference.url);
+    const comparison = reference.comparison || {};
+    const [statusClass, statusLabel] = referenceStatus[reference.classification] || referenceStatus["not-checked"];
+    const localScore = comparison.score == null ? "—" : comparison.score;
+    const scoreCaption = comparison.score == null ? "local score" : "/ 100 whole-photo";
+    return `<article class="photo-reference-row">
+      <span class="photo-reference-rank">${escapeHtml(String(reference.rank ?? index + 1).padStart(2, "0"))}</span>
+      <div class="photo-reference-copy"><h4>${page ? `<a href="${escapeHtml(page)}" target="_blank" rel="noreferrer noopener">${escapeHtml(reference.title || page)}</a>` : escapeHtml(reference.title || "Source page")}</h4><p>${escapeHtml(reference.domain || "web")} · ${escapeHtml(reference.result_type || "image reference")}</p></div>
+      <div class="photo-reference-score"><span class="reference-badge ${statusClass}">${statusLabel}</span><strong>${escapeHtml(localScore)} <small>${scoreCaption}</small></strong></div>
+    </article>`;
+  }).join("");
+
+  const filterTabs = matches.length ? `
+    <div class="filter-tabs" role="tablist">
+      <button class="filter-tab active" data-filter="all">All (${matches.length})</button>
+      ${platformCounts.github > 0 ? `<button class="filter-tab" data-filter="github">GitHub (${platformCounts.github})</button>` : ""}
+      ${platformCounts.linkedin > 0 ? `<button class="filter-tab" data-filter="linkedin">LinkedIn (${platformCounts.linkedin})</button>` : ""}
+      ${platformCounts.social > 0 ? `<button class="filter-tab" data-filter="social">Social Media (${platformCounts.social})</button>` : ""}
+      ${platformCounts.web > 0 ? `<button class="filter-tab" data-filter="web">Web &amp; Media (${platformCounts.web})</button>` : ""}
+    </div>` : "";
+
+  const referenceSection = references.length ? `<section class="photo-reference-section"><div class="photo-reference-heading"><span class="section-kicker">ALL WEB SEARCH REFERENCES</span><strong>${escapeHtml(references.length)} unique HTTPS pages found</strong></div><p class="photo-reference-note">These links were returned by the live web reverse search. Verified matches are anchored to the blockchain record.</p><div class="photo-reference-list">${referenceRows}</div></section>` : "";
+
+  output.innerHTML = `<div class="outcome-hero ${matches.length ? "" : "warn"}">
+    <div class="outcome-top"><div><span class="section-kicker">RUN ${escapeHtml(result.run_id)}</span><h3>${matches.length ? `${matches.length} matching web link${matches.length === 1 ? "" : "s"} found across GitHub, LinkedIn, social &amp; web` : "No confirmed web copies"}</h3>
+    <p>${matches.length ? "These pages contain matching faces or images that passed independent neural & visual verification." : `The provider returned ${escapeHtml(result.returned_image_references ?? 0)} image references; none passed the local verification. All retained page links are listed below. No proof block was created.`}</p></div><span class="outcome-badge ${matches.length ? "completed" : "inconclusive"}">${status}</span></div></div>
+    <div class="photo-scan-note"><span class="section-kicker">NEURAL FACE VERIFICATION</span><strong>${escapeHtml(faceScanText)}</strong><small>Evaluates candidate faces independently with SFace cosine similarity and perceptual hashing.</small></div>
+    ${filterTabs}
+    ${matches.length ? `<section class="photo-match-list">${links}</section>` : ""}
+    ${referenceSection}
+    <section class="photo-proof-summary"><div class="fact-grid">
+      <div class="fact"><span>References returned</span><strong>${escapeHtml(result.returned_image_references ?? 0)}</strong></div>
+      <div class="fact"><span>Matches confirmed</span><strong>${escapeHtml(matches.length)}</strong></div>
+      <div class="fact"><span>Images checked</span><strong>${escapeHtml(result.checked_image_references ?? 0)}</strong></div>
+      <div class="fact"><span>Search ID</span><strong>${escapeHtml(shortHash(result.search_id))}</strong></div>
+    </div>
+    <div class="photo-proof-network"><span>Cryptographic Proof</span><strong>${receipt ? "Tamper-Evident SHA-256 Blockchain Commitment" : "Not created"}</strong></div>
+    ${receipt ? `<div class="label-warning">BLOCK ${escapeHtml(receipt.block_index)} · COMMITMENT ${escapeHtml(shortHash(receipt.block_hash))} · ${escapeHtml(receipt.network)} · Cryptographically sealed proof of discovery.</div>` : ""}
+    ${matches.length ? `<div class="proof-actions"><button id="photo-verify-button" class="button button-primary" type="button">Verify Proof On-Chain</button><button id="photo-tamper-button" class="button button-ghost" type="button">Simulate Tamper Test</button><button id="photo-download-button" class="button button-ghost" type="button">Download Evidence (.zip)</button></div><div id="photo-proof-message" class="inline-message hidden"></div>` : ""}</section>`;
+
+  if (matches.length) {
+    $("#photo-verify-button").addEventListener("click", () => photoCopyAction("verify"));
+    $("#photo-tamper-button").addEventListener("click", () => photoCopyAction("tamper"));
+    $("#photo-download-button").addEventListener("click", () => photoCopyAction("download"));
+
+    // Attach filter tab listeners
+    $$(".filter-tab", output).forEach((tab) => {
+      tab.addEventListener("click", () => {
+        $$(".filter-tab", output).forEach(t => t.classList.remove("active"));
+        tab.classList.add("active");
+        const filter = tab.dataset.filter;
+        $$(".photo-match-card", output).forEach((card) => {
+          if (filter === "all" || card.dataset.category === filter) {
+            card.classList.remove("hidden");
+          } else {
+            card.classList.add("hidden");
+          }
+        });
+      });
+    });
+  }
+}
+
+async function photoCopyAction(action) {
+  if (!photoCopyJobId) return;
+  const message = $("#photo-proof-message");
+  try {
+    if (action === "download") {
+      const response = await fetch(`/api/photos/${encodeURIComponent(photoCopyJobId)}/download`, {method: "POST", headers: {"X-FaceProof-CSRF": csrf}});
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `Export failed (${response.status})`);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a"); link.href = url; link.download = `photo-proof-${photoCopyJobId}.zip`; link.click();
+      URL.revokeObjectURL(url);
+      toast("Evidence bundle downloaded");
+      return;
+    }
+    const value = await api(`/api/photos/${encodeURIComponent(photoCopyJobId)}/${action}`, {method: "POST", headers: {"X-FaceProof-CSRF": csrf}});
+    message.className = `inline-message ${action === "tamper" && value.tamper_detected || action === "verify" && value.passed ? "ok" : "warn"}`;
+    message.textContent = action === "tamper" ? (value.tamper_detected ? "Tamper detected: changing the manifest digest does not verify against the stored block." : "Tamper test did not fail as expected.") : (value.passed ? "Verified: the manifest, artifacts, receipt, and complete local chain agree." : `Verification failed: ${value.reason || "evidence changed"}`);
+    message.classList.remove("hidden");
+  } catch (error) {
+    message.className = "inline-message warn";
+    message.textContent = error.message;
+    message.classList.remove("hidden");
+  }
+}
+
+function schedulePhotoCopyPoll(delay = 650) {
+  window.clearTimeout(photoCopyPollTimer);
+  photoCopyPollTimer = window.setTimeout(pollPhotoCopy, delay);
+}
+
+async function pollPhotoCopy() {
+  if (!photoCopyJobId) return;
+  try {
+    const job = await api(`/api/photos/${encodeURIComponent(photoCopyJobId)}`);
+    renderPhotoCopyJob(job);
+    if (job.state === "completed") {
+      renderPhotoCopyResult(job.result || await api(`/api/photos/${encodeURIComponent(photoCopyJobId)}/result`));
+      $("#photo-copy-button").disabled = false;
+      loadHistory();
+      return;
+    }
+    if (job.state === "failed") {
+      $("#photo-copy-result").classList.remove("hidden");
+      $("#photo-copy-result").innerHTML = `<div class="outcome-hero fail"><div class="outcome-top"><div><span class="section-kicker">FAILED SAFELY</span><h3>Search stopped</h3><p>${escapeHtml(job.error || "No successful proof was claimed.")}</p></div><span class="outcome-badge failed">FAILED</span></div></div>`;
+      $("#photo-copy-button").disabled = false;
+      return;
+    }
+    schedulePhotoCopyPoll();
+  } catch (error) {
+    $("#photo-copy-button").disabled = false;
+    $("#photo-copy-result").classList.remove("hidden");
+    $("#photo-copy-result").innerHTML = `<div class="outcome-hero fail"><div class="outcome-top"><div><span class="section-kicker">CONNECTION ERROR</span><h3>Session status unavailable</h3><p>${escapeHtml(error.message)}</p></div><span class="outcome-badge failed">FAILED</span></div></div>`;
+  }
+}
+
+async function submitPhotoCopy(event) {
+  event.preventDefault();
+  const errorBox = $("#photo-copy-error");
+  if (!photoCopyFile) { errorBox.textContent = "Choose one image first."; errorBox.classList.remove("hidden"); return; }
+  if (!$("#photo-copy-consent").checked) { errorBox.textContent = "Confirm that you are authorized to process this image first."; errorBox.classList.remove("hidden"); return; }
+  if (photoCopyFile.size > 25 * 1024 * 1024) { errorBox.textContent = "Use an image smaller than 25 MB."; errorBox.classList.remove("hidden"); return; }
+  const button = $("#photo-copy-button"); button.disabled = true; errorBox.classList.add("hidden");
+  $("#photo-copy-empty").classList.add("hidden"); $("#photo-copy-result").classList.add("hidden"); $("#photo-copy-progress").classList.remove("hidden");
+  $("#photo-copy-state").textContent = "QUEUED"; $("#photo-copy-progress-title").textContent = "Sending one photo to the search adapter…";
+  try {
+    const payload = new FormData(); payload.append("image", photoCopyFile, photoCopyFile.name); payload.set("consent", "true");
+    const requestId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`).replace(/[^a-zA-Z0-9-]/g, "");
+    const started = await api("/api/photos", {method: "POST", headers: {"X-FaceProof-CSRF": csrf, "Idempotency-Key": requestId}, body: payload});
+    photoCopyJobId = started.id;
+    pollPhotoCopy();
+  } catch (error) {
+    button.disabled = false; errorBox.textContent = error.message; errorBox.classList.remove("hidden");
+    $("#photo-copy-state").textContent = "IDLE"; $("#photo-copy-progress").classList.add("hidden"); $("#photo-copy-empty").classList.remove("hidden");
+  }
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, options);
   let payload = null;
@@ -76,7 +378,7 @@ function setReadyRow(name, ready, detail) {
 }
 
 function selectedProvider() {
-  return $('input[name="search-provider"]:checked')?.value || "bluesky";
+  return $('input[name="search-provider"]:checked')?.value || "lens";
 }
 
 function renderSourceReadiness() {
@@ -88,7 +390,7 @@ function renderSourceReadiness() {
   if (bluesky) {
     $("#quota-value").textContent = "No API key";
     $("#quota-bar").style.width = "100%";
-  } else if (Number.isFinite(source.remaining) && Number.isFinite(source.monthly)) {
+  } else if (Number.isFinite(source.remaining) && Number.isFinite(source.monthly) && source.monthly > 0) {
     $("#quota-value").textContent = `${source.remaining} / ${source.monthly}`;
     $("#quota-bar").style.width = `${Math.max(0, Math.min(100, source.remaining / source.monthly * 100))}%`;
   } else {
@@ -106,18 +408,37 @@ async function loadReadiness() {
     const data = await api("/api/readiness");
     readinessState = data;
     setReadyRow("models", data.models.ready, data.models.ready ? "Pinned model hashes verified" : "Download verified model assets");
-    setReadyRow("chain", data.blockchain.ready, data.blockchain.detail);
+    const chainDetail = data.blockchain.ready
+      ? data.blockchain.detail
+      : `${data.blockchain.detail} · Photo-copy evidence still uses the local SHA-256 chain.`;
+    setReadyRow("chain", data.blockchain.ready, chainDetail);
     renderSourceReadiness();
-    $("#metric-accuracy").textContent = `${(data.accuracy.scored_pair_accuracy * 100).toFixed(2)}%`;
-    $("#metric-coverage").textContent = `${(data.accuracy.pair_coverage * 100).toFixed(2)}%`;
-    $("#metric-scope").textContent = data.accuracy.scope;
     const anchorChoice = $("#anchor-choice");
-    anchorChoice.classList.toggle("disabled", !data.blockchain.ready);
-    $("input[name='mode'][value='anchor']").disabled = !data.blockchain.ready;
+    if (anchorChoice) anchorChoice.classList.toggle("disabled", !data.blockchain.ready);
+    const anchorInput = $("input[name='mode'][value='anchor']");
+    if (anchorInput) anchorInput.disabled = !data.blockchain.ready;
   } catch (error) {
     $("#overall-status").textContent = "Offline";
     $("#overall-status").className = "status-orb partial";
+    for (const name of ["models", "search", "chain"]) {
+      setReadyRow(name, false, "Status unavailable. Reload to retry the connection.");
+      $(`#${name}-state`).textContent = "UNKNOWN";
+    }
     toast(error.message);
+  }
+}
+
+async function loadPhotoCopyStatus() {
+  try {
+    const data = await api("/api/photos/status");
+    const chip = $("#photo-copy-credit");
+    if (chip) {
+      chip.textContent = data.search_configured ? "1 CREDIT" : "API KEY NEEDED";
+      chip.classList.toggle("missing", !data.search_configured);
+    }
+  } catch {
+    const chip = $("#photo-copy-credit");
+    if (chip) chip.textContent = "STATUS UNKNOWN";
   }
 }
 
@@ -125,45 +446,56 @@ function setSelectedFile(file) {
   if (previewUrl) URL.revokeObjectURL(previewUrl);
   selectedFile = file || null;
   previewUrl = file ? URL.createObjectURL(file) : null;
-  $("#drop-placeholder").classList.toggle("hidden", Boolean(file));
-  $("#file-preview").classList.toggle("hidden", !file);
+  $("#drop-placeholder")?.classList.toggle("hidden", Boolean(file));
+  $("#file-preview")?.classList.toggle("hidden", !file);
   if (file) {
-    $("#preview-image").src = previewUrl;
-    $("#file-name").textContent = file.name;
-    $("#file-size").textContent = formatBytes(file.size);
+    const previewImg = $("#preview-image");
+    if (previewImg) previewImg.src = previewUrl;
+    const nameEl = $("#file-name");
+    if (nameEl) nameEl.textContent = file.name;
+    const sizeEl = $("#file-size");
+    if (sizeEl) sizeEl.textContent = formatBytes(file.size);
   } else {
-    $("#image-input").value = "";
-    $("#preview-image").removeAttribute("src");
+    const inputEl = $("#image-input");
+    if (inputEl) inputEl.value = "";
+    $("#preview-image")?.removeAttribute("src");
   }
   const preflight = $("#preflight-result");
-  preflight.textContent = "";
-  preflight.className = "inline-message hidden";
+  if (preflight) {
+    preflight.textContent = "";
+    preflight.className = "inline-message hidden";
+  }
 }
 
 function selectedMode() {
-  return $("input[name='mode']:checked").value;
+  return $("input[name='mode']:checked")?.value || "discovery";
 }
 
 function updateSearchProvider() {
   const bluesky = selectedProvider() === "bluesky";
-  $("#bluesky-options").classList.toggle("hidden", !bluesky);
-  $("#lens-options").classList.toggle("hidden", bluesky);
-  $("#provider-upload-row").classList.toggle("hidden", bluesky);
+  $("#bluesky-options")?.classList.toggle("hidden", !bluesky);
+  $("#lens-options")?.classList.toggle("hidden", bluesky);
+  $("#provider-upload-row")?.classList.toggle("hidden", bluesky);
   if (bluesky) {
-    $("#consent-upload").checked = false;
-    $("#profile-discovery").checked = false;
-    $('input[name="search-mode"][value="standard"]').checked = true;
+    const cu = $("#consent-upload");
+    if (cu) cu.checked = false;
+    const pd = $("#profile-discovery");
+    if (pd) pd.checked = false;
+    const sm = $('input[name="search-mode"][value="standard"]');
+    if (sm) sm.checked = true;
   }
   renderSourceReadiness();
 }
 
 function updateMode() {
   const anchor = selectedMode() === "anchor";
-  $("#anchor-fields").classList.toggle("hidden", !anchor);
-  $("#run-button span:first-child").textContent = anchor ? "Run fresh search & anchor" : "Run live discovery";
+  $("#anchor-fields")?.classList.toggle("hidden", !anchor);
+  const btnSpan = $("#run-button span:first-child");
+  if (btnSpan) btnSpan.textContent = anchor ? "Run fresh search & anchor" : "Run live discovery";
   if (!anchor) {
     reviewedRunId = null;
-    $("#approved-url").value = "";
+    const appUrl = $("#approved-url");
+    if (appUrl) appUrl.value = "";
   }
 }
 
@@ -238,6 +570,7 @@ function validateForm() {
 }
 
 function showProgress(job) {
+  $("#terminal-state").textContent = job.state.toUpperCase();
   $("#result-empty").classList.add("hidden");
   $("#result-content").classList.add("hidden");
   $("#job-progress").classList.remove("hidden");
@@ -254,7 +587,7 @@ function showProgress(job) {
     bar.style.width = "34%";
   }
   $("#timeline").innerHTML = stages.map((stage) => `
-    <li><span class="timeline-icon">✓</span><span>${escapeHtml(stage.message)}</span><time>${escapeHtml(formatTime(stage.at).split(", ").pop())}</time></li>
+    <li><span class="timeline-icon" aria-hidden="true">›</span><span>${escapeHtml(stage.message)}</span><time>${escapeHtml(formatTime(stage.at).split(", ").pop())}</time></li>
   `).join("");
 }
 
@@ -375,7 +708,16 @@ function statusCopy(summary, jobState) {
   if (summary?.status === "anchor-recorded") return ["anchor-recorded", "On-chain receipt recorded—verify now", "A saved chain receipt is present. Run the independent verification below before treating it as a current passing proof."];
   if (summary?.status === "anchor-pending") return ["anchor-pending", "Anchor submitted—safe recovery required", "A signed transaction hash was journaled before broadcast. Recover that exact hash; never submit a replacement transaction blindly."];
   if (summary?.status === "discovered") return ["discovered", "Matching public post discovered", "The live result passed independent local comparison and the evidence bundle is sealed, but this development run was not put on-chain."];
-  if (jobState === "inconclusive" || summary?.status === "inconclusive") return ["inconclusive", "No verified social-post match", "The search was genuine, but no returned public post passed every local and capture gate. This is an honest inconclusive result—not an identity finding."];
+  if (jobState === "inconclusive" || summary?.status === "inconclusive") {
+    if (summary?.error?.stage === "social-filter") {
+      const count = summary.search?.candidate_count;
+      const observed = Number.isInteger(count) && count >= 0
+        ? `The saved search contains ${count} candidate ${count === 1 ? "entry" : "entries"}.`
+        : "The saved search did not produce an eligible social post.";
+      return ["inconclusive", "No eligible social post in these results", `${observed} None entered the social-post comparison stage. No social-post match score or blockchain record was created.`];
+    }
+    return ["inconclusive", "No verified post in this run", "The returned candidates did not produce a verified post. No matching result or score is available."];
+  }
   if (summary?.error?.code === "face-quality") return ["failed", "Use a clearer face image", summary.error.action || "Use an original-resolution image with one clear, unobstructed face."];
   return ["failed", "Pipeline stopped safely", "A required gate failed before a verified result could be claimed. No fallback result or blockchain write was substituted."];
 }
@@ -509,6 +851,7 @@ function renderIntegrity(summary) {
 }
 
 function renderSummary(summary, jobState = null, jobError = null) {
+  $("#terminal-state").textContent = String(jobState || summary?.status || "FAILED").toUpperCase();
   $("#result-empty").classList.add("hidden");
   $("#job-progress").classList.add("hidden");
   const result = $("#result-content");
@@ -518,7 +861,7 @@ function renderSummary(summary, jobState = null, jobError = null) {
     return;
   }
   const [tone, title, description] = statusCopy(summary, jobState);
-  const outcomeMessage = summary.error?.code === "face-quality"
+  const outcomeMessage = summary.error?.code === "face-quality" || summary.error?.stage === "social-filter"
     ? description
     : summary.error?.message || description;
   result.innerHTML = `
@@ -613,29 +956,33 @@ function showProofMessage(message, passed) {
 }
 
 function historyTitle(run) {
+  if (run.error?.stage === "social-filter") return "No eligible social post in these results";
   return run.selected?.title || run.error?.message || "Evidence run";
 }
 
 async function loadHistory() {
   const grid = $("#history-grid");
+  if (!grid) return;
   try {
-    const data = await api("/api/history?limit=12");
-    if (!data.runs.length) {
-      grid.innerHTML = '<div class="history-loading">No local runs yet. Your first consented analysis will appear here.</div>';
+    const data = await api("/api/photos/history");
+    const photoRuns = Array.isArray(data?.runs) ? data.runs : [];
+    if (!photoRuns.length) {
+      grid.innerHTML = '<div class="history-loading">No saved scans yet. Your completed web face discoveries will appear here.</div>';
       return;
     }
-    grid.innerHTML = data.runs.map((run) => `
-      <button class="history-card" type="button" data-run-id="${escapeHtml(run.run_id)}">
-        <span class="history-card-top"><span class="section-kicker">${escapeHtml(run.search?.provider || "LOCAL")}</span><span class="outcome-badge ${escapeHtml(run.status)}">${escapeHtml(run.status)}</span></span>
-        <h3>${escapeHtml(historyTitle(run))}</h3>
-        <p>${escapeHtml(run.selected ? `${run.selected.platform || run.selected.source || "web"} · similarity ${number(run.selected.similarity, 6)}` : `${run.search?.candidate_count || 0} candidates · ${run.error?.stage || "partial evidence"}`)}</p>
-        <span class="history-card-footer"><span>${escapeHtml(run.run_id)}</span><span>Inspect →</span></span>
+    grid.innerHTML = photoRuns.map((run) => `
+      <button class="history-card" type="button" data-run-id="${escapeHtml(run.id)}">
+        <span class="history-card-top"><span class="section-kicker">WEB DISCOVERY</span><span class="outcome-badge ${run.count > 0 ? "completed" : "inconclusive"}">${escapeHtml(run.status)}</span></span>
+        <h3>Session ${escapeHtml(run.id.slice(0, 8))}…</h3>
+        <p>${run.count} matching web link${run.count === 1 ? "" : "s"} found · ${escapeHtml(formatTime(run.created_at))}</p>
+        <span class="history-card-footer"><span>${escapeHtml(run.id)}</span><span>Inspect →</span></span>
       </button>`).join("");
     $$(".history-card", grid).forEach((card) => card.addEventListener("click", async () => {
       try {
-        const run = await api(`/api/evidence/${encodeURIComponent(card.dataset.runId)}`);
-        renderSummary(run);
-        $("#result-panel").scrollIntoView({behavior: "smooth", block: "start"});
+        const result = await api(`/api/photos/${encodeURIComponent(card.dataset.runId)}/result`);
+        photoCopyJobId = card.dataset.runId;
+        renderPhotoCopyResult(result);
+        $("#workspace")?.scrollIntoView({behavior: "smooth", block: "start"});
       } catch (error) { toast(error.message); }
     }));
   } catch (error) {
@@ -643,21 +990,45 @@ async function loadHistory() {
   }
 }
 
+const photoDropZone = $("#photo-drop-zone");
+$("#photo-copy-input")?.addEventListener("change", (event) => setPhotoCopyFile(event.target.files[0]));
+$("#photo-remove-file")?.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); setPhotoCopyFile(null); });
+["dragenter", "dragover"].forEach((name) => photoDropZone?.addEventListener(name, (event) => { event.preventDefault(); photoDropZone?.classList.add("dragging"); }));
+["dragleave", "drop"].forEach((name) => photoDropZone?.addEventListener(name, (event) => { event.preventDefault(); photoDropZone?.classList.remove("dragging"); }));
+photoDropZone?.addEventListener("drop", (event) => {
+  event.preventDefault();
+  photoDropZone?.classList.remove("dragging");
+  if (event.dataTransfer?.files?.length) setPhotoCopyFile(event.dataTransfer.files[0]);
+});
+
+$("#photo-copy-form")?.addEventListener("submit", submitPhotoCopy);
+$("#refresh-history")?.addEventListener("click", loadHistory);
+
+// Legacy elements (safely attached only if present)
 const dropZone = $("#drop-zone");
-$("#image-input").addEventListener("change", (event) => setSelectedFile(event.target.files[0]));
-$("#remove-file").addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); setSelectedFile(null); });
-["dragenter", "dragover"].forEach((name) => dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.classList.add("dragging"); }));
-["dragleave", "drop"].forEach((name) => dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.classList.remove("dragging"); }));
-dropZone.addEventListener("drop", (event) => { if (event.dataTransfer.files.length) setSelectedFile(event.dataTransfer.files[0]); });
+$("#image-input")?.addEventListener("change", (event) => setSelectedFile(event.target.files[0]));
+$("#remove-file")?.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); setSelectedFile(null); });
+["dragenter", "dragover"].forEach((name) => dropZone?.addEventListener(name, (event) => { event.preventDefault(); dropZone?.classList.add("dragging"); }));
+["dragleave", "drop"].forEach((name) => dropZone?.addEventListener(name, (event) => { event.preventDefault(); dropZone?.classList.remove("dragging"); }));
+dropZone?.addEventListener("drop", (event) => {
+  event.preventDefault();
+  dropZone?.classList.remove("dragging");
+  if (event.dataTransfer?.files?.length) setSelectedFile(event.dataTransfer.files[0]);
+});
+
 $$('input[name="mode"]').forEach((input) => input.addEventListener("change", updateMode));
 $$('input[name="search-provider"]').forEach((input) => input.addEventListener("change", updateSearchProvider));
-$("#max-candidates").addEventListener("input", (event) => { $("#candidate-count").textContent = event.target.value; });
-$("#preflight-button").addEventListener("click", runPreflight);
-$("#run-form").addEventListener("submit", submitRun);
-$("#refresh-history").addEventListener("click", loadHistory);
+$("#max-candidates")?.addEventListener("input", (event) => {
+  const countEl = $("#candidate-count");
+  if (countEl) countEl.textContent = event.target.value;
+});
+$("#preflight-button")?.addEventListener("click", runPreflight);
+$("#run-form")?.addEventListener("submit", submitRun);
 
-updateMode();
-updateSearchProvider();
+if ($('input[name="mode"]')) updateMode();
+if ($('input[name="search-provider"]')) updateSearchProvider();
+
 loadReadiness();
+loadPhotoCopyStatus();
 loadHistory();
 resumeActiveJob();

@@ -39,6 +39,7 @@ from .face import (
     QualityPolicy,
 )
 from .model_assets import verify_default_models
+from .photo_web import register_photo_routes
 from .pipeline import (
     InconclusiveError,
     PipelineError,
@@ -523,6 +524,11 @@ def create_app(
     def require_csrf(value: str | None) -> None:
         if value is None or not secrets.compare_digest(value, csrf_token):
             raise HTTPException(status_code=403, detail="Invalid local request token")
+
+    # The quick photo-copy workflow is intentionally separate from the consented
+    # face-to-post review workflow below. It searches for copies of the complete
+    # uploaded photograph and anchors only that evidence.
+    register_photo_routes(app, runtime, require_csrf)
 
     async def verify_stable_anchor_state(
         run_dir: Path,
