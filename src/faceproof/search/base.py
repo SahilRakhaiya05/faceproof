@@ -11,8 +11,10 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 SOCIAL_HOSTS = frozenset(
     {
         "bsky.app",
+        "devfolio.co",
         "facebook.com",
         "github.com",
+        "huggingface.co",
         "instagram.com",
         "linkedin.com",
         "m.facebook.com",
@@ -20,8 +22,10 @@ SOCIAL_HOSTS = frozenset(
         "tiktok.com",
         "twitter.com",
         "x.com",
+        "www.devfolio.co",
         "www.facebook.com",
         "www.github.com",
+        "www.huggingface.co",
         "www.instagram.com",
         "www.linkedin.com",
         "www.reddit.com",
@@ -35,7 +39,19 @@ SOCIAL_HOSTS = frozenset(
 )
 
 SUPPORTED_PLATFORMS = frozenset(
-    {"bluesky", "facebook", "github", "instagram", "linkedin", "reddit", "tiktok", "x", "youtube"}
+    {
+        "bluesky",
+        "devfolio",
+        "facebook",
+        "github",
+        "huggingface",
+        "instagram",
+        "linkedin",
+        "reddit",
+        "tiktok",
+        "x",
+        "youtube",
+    }
 )
 CAPTURE_CAPABLE_PLATFORMS = frozenset({"bluesky", "reddit", "x", "youtube"})
 PROFILE_LEAD_PLATFORMS = frozenset({"linkedin"})
@@ -284,6 +300,8 @@ def platform_name(url: str) -> str | None:
     suffixes = (
         ("github.com", "github"),
         ("githubusercontent.com", "github"),
+        ("devfolio.co", "devfolio"),
+        ("huggingface.co", "huggingface"),
         ("linkedin.com", "linkedin"),
         ("instagram.com", "instagram"),
         ("twitter.com", "x"),
@@ -324,6 +342,27 @@ def is_social_profile_url(url: str) -> bool:
             "settings",
             "topics",
             "trending",
+        }
+        return len(segments) == 1 and segments[0].casefold() not in reserved
+    if platform == "devfolio":
+        return len(segments) == 1 and segments[0].startswith("@")
+    if platform == "huggingface":
+        reserved = {
+            "api",
+            "blog",
+            "chat",
+            "datasets",
+            "docs",
+            "enterprise",
+            "join",
+            "login",
+            "models",
+            "pricing",
+            "privacy",
+            "settings",
+            "spaces",
+            "terms",
+            "welcome",
         }
         return len(segments) == 1 and segments[0].casefold() not in reserved
     if platform == "linkedin":

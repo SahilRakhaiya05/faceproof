@@ -162,10 +162,20 @@ function renderPhotoCopyResult(result) {
     : `Quality note: ${faceScan.reason || "Perceptual copy matching active"}`;
 
   // Count matches by platform category
-  const platformCounts = { all: matches.length, github: 0, linkedin: 0, social: 0, web: 0 };
+  const platformCounts = {
+    all: matches.length,
+    devfolio: 0,
+    huggingface: 0,
+    github: 0,
+    linkedin: 0,
+    social: 0,
+    web: 0,
+  };
   for (const m of matches) {
     const p = String(m.platform || m.domain || "").toLowerCase();
-    if (p.includes("github")) platformCounts.github++;
+    if (p.includes("devfolio")) platformCounts.devfolio++;
+    else if (p.includes("huggingface")) platformCounts.huggingface++;
+    else if (p.includes("github")) platformCounts.github++;
     else if (p.includes("linkedin")) platformCounts.linkedin++;
     else if (["x", "twitter", "reddit", "bluesky", "youtube", "facebook", "instagram", "tiktok"].some(s => p.includes(s))) platformCounts.social++;
     else platformCounts.web++;
@@ -177,29 +187,44 @@ function renderPhotoCopyResult(result) {
     const comparison = match.comparison || {};
     const metrics = comparison.metrics || {};
     const platform = String(match.platform || match.domain || "web").toLowerCase();
+    const isDevfolio = platform.includes("devfolio");
+    const isHuggingface = platform.includes("huggingface");
     const isGithub = platform.includes("github");
     const isLinkedin = platform.includes("linkedin");
     const isSocial = ["x", "twitter", "reddit", "bluesky", "youtube", "facebook", "instagram", "tiktok"].some(s => platform.includes(s));
-    const platformClass = isGithub ? "github" : isLinkedin ? "linkedin" : isSocial ? "social" : "web";
-    const platformLabel = isGithub ? "GitHub" : isLinkedin ? "LinkedIn" : isSocial ? (match.platform?.toUpperCase() || "Social") : "Web Page";
-    const categoryAttr = isGithub ? "github" : isLinkedin ? "linkedin" : isSocial ? "social" : "web";
+    const platformClass = isDevfolio ? "devfolio" : isHuggingface ? "huggingface" : isGithub ? "github" : isLinkedin ? "linkedin" : isSocial ? "social" : "web";
+    const platformLabel = isDevfolio ? "Devfolio" : isHuggingface ? "Hugging Face" : isGithub ? "GitHub" : isLinkedin ? "LinkedIn" : isSocial ? (match.platform?.toUpperCase() || "Social") : "Web Page";
+    const categoryAttr = isDevfolio ? "devfolio" : isHuggingface ? "huggingface" : isGithub ? "github" : isLinkedin ? "linkedin" : isSocial ? "social" : "web";
 
     const faceAcc = match.face_accuracy_percent != null && match.face_accuracy_percent > 0 ? match.face_accuracy_percent : null;
     const photoScore = comparison.score != null ? comparison.score : null;
+
+    let badgeClass = "visual-match";
+    let badgeText = "CONFIRMED COPY";
+    if (match.match_type === "developer_face_match") {
+      badgeClass = "face-match";
+      badgeText = "VERIFIED DEVELOPER + FACE";
+    } else if (match.match_type === "developer_profile" || match.verified_developer) {
+      badgeClass = "face-match";
+      badgeText = "VERIFIED DEVELOPER";
+    } else if (match.face_match) {
+      badgeClass = "face-match";
+      badgeText = "VERIFIED FACE MATCH";
+    }
 
     return `<article class="photo-match-card" data-category="${categoryAttr}">
       ${image ? `<div class="match-img-wrap"><img src="${escapeHtml(image)}" alt="Matched candidate ${index + 1}"><span class="platform-tag ${platformClass}">${platformLabel}</span></div>` : `<div class="photo-match-placeholder"><span class="platform-tag ${platformClass}">${platformLabel}</span></div>`}
       <div class="photo-match-copy">
         <div class="match-header">
           <span class="section-kicker">MATCH ${String(index + 1).padStart(2, "0")} · ${escapeHtml(match.domain || "web")}</span>
-          <span class="match-badge ${match.face_match ? "face-match" : "visual-match"}">${match.face_match ? "VERIFIED FACE MATCH" : "CONFIRMED COPY"}</span>
+          <span class="match-badge ${badgeClass}">${badgeText}</span>
         </div>
         <h4>${page ? `<a href="${escapeHtml(page)}" target="_blank" rel="noreferrer noopener">${escapeHtml(match.title || page)} <span class="ext-link-icon">↗</span></a>` : escapeHtml(match.title || "Source page")}</h4>
         
         <div class="scores-row">
           ${faceAcc != null ? `
           <div class="score-pill face-score">
-            <span class="score-label">Face Accuracy</span>
+            <span class="score-label">Identity Confidence</span>
             <strong class="score-val">${faceAcc}%</strong>
             <div class="score-bar"><span style="width: ${faceAcc}%"></span></div>
           </div>` : ""}
@@ -238,6 +263,8 @@ function renderPhotoCopyResult(result) {
   const filterTabs = matches.length ? `
     <div class="filter-tabs" role="tablist">
       <button class="filter-tab active" data-filter="all">All (${matches.length})</button>
+      ${platformCounts.devfolio > 0 ? `<button class="filter-tab" data-filter="devfolio">Devfolio (${platformCounts.devfolio})</button>` : ""}
+      ${platformCounts.huggingface > 0 ? `<button class="filter-tab" data-filter="huggingface">Hugging Face (${platformCounts.huggingface})</button>` : ""}
       ${platformCounts.github > 0 ? `<button class="filter-tab" data-filter="github">GitHub (${platformCounts.github})</button>` : ""}
       ${platformCounts.linkedin > 0 ? `<button class="filter-tab" data-filter="linkedin">LinkedIn (${platformCounts.linkedin})</button>` : ""}
       ${platformCounts.social > 0 ? `<button class="filter-tab" data-filter="social">Social Media (${platformCounts.social})</button>` : ""}

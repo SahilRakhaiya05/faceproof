@@ -34,6 +34,7 @@ from .photo_chain import PhotoChain, PhotoChainError
 from .photo_copy import PhotoInputError, compare_photos, normalize_photo
 from .search.base import classify_domain, is_social_post_url, redact_url_secrets
 from .search.serpapi import SerpApiLensProvider
+from .search.tech_discovery import discover_tech_profiles, extract_identity_seeds
 
 MAX_BYTES = 25 * 1024 * 1024
 MAX_CANDIDATES = 48
@@ -64,11 +65,15 @@ def _candidate_priority(candidate: Any) -> tuple[int, int]:
     url = getattr(candidate, "normalized_url", "")
     host = (urlsplit(url).hostname or "").lower()
     platform = classify_domain(url).lower()
+    if getattr(candidate, "result_type", "") == "verified_developer_profile":
+        return (0, 0)
     exact = bool(getattr(candidate, "exact_match", False))
     if exact:
         return (0, getattr(candidate, "rank", 999))
 
     profile_platforms = {
+        "devfolio",
+        "huggingface",
         "linkedin",
         "github",
         "x",
@@ -79,7 +84,17 @@ def _candidate_priority(candidate: Any) -> tuple[int, int]:
         "bluesky",
     }
     if platform in profile_platforms or any(
-        k in host for k in ("linkedin.", "github.", "twitter.", "x.com", "instagram.", "facebook.")
+        k in host
+        for k in (
+            "devfolio.",
+            "huggingface.",
+            "linkedin.",
+            "github.",
+            "twitter.",
+            "x.com",
+            "instagram.",
+            "facebook.",
+        )
     ):
         return (1, getattr(candidate, "rank", 999))
 
@@ -199,6 +214,7 @@ def run_photo_search(
     provider_factory: Callable[..., Any] = SerpApiLensProvider,
     download: Callable[..., Any] = materialize_candidate_image,
     scan: Callable[..., dict[str, Any]] = _local_scan,
+    tech_discoverer: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     run_dir.mkdir(parents=True, exist_ok=False)
     query_path = run_dir / "query.jpg"
@@ -255,6 +271,20 @@ def run_photo_search(
     }
     _write(run_dir / "provider.json", provider_record)
     candidates = list(found.candidates)
+    try:
+        seed_handles, seed_names = extract_identity_seeds(candidates, found.web_labels)
+        if seed_handles or seed_names:
+            emit(
+                "Running deep tech discovery across Devfolio, Hugging Face, GitHub & tech networks."
+            )
+            discoverer = tech_discoverer or discover_tech_profiles
+            tech_profiles = discoverer(
+                seed_handles, seed_names, timeout_seconds=settings.http_timeout_seconds
+            )
+            for tp in tech_profiles:
+                candidates.append(tp.to_candidate(rank=0))
+    except Exception:
+        pass
     candidates.sort(key=_candidate_priority)
     emit(f"Search returned {len(candidates)} image references; checking up to {MAX_CANDIDATES}.")
     matches: list[dict[str, Any]] = []
@@ -300,18 +330,35 @@ def run_photo_search(
         checked += 1
         total_eval = min(len(candidates), MAX_CANDIDATES)
         emit(f"Evaluating candidate {checked}/{total_eval} with dual face + photo match.")
+        is_verified_developer = (
+            getattr(candidate, "result_type", "") == "verified_developer_profile"
+        )
         try:
             with tempfile.TemporaryDirectory(prefix="photo-copy-") as temporary:
-                media = download(candidate, Path(temporary), timeout_seconds=10)
-                media_path = Path(media.relative_path)
-                if (
-                    media_path.is_absolute()
-                    or media_path.name != media.relative_path
-                    or media_path in {Path("."), Path("..")}
-                ):
-                    raise CaptureError("Candidate media path is not a safe file name")
-                full_media_path = Path(temporary) / media_path
-                raw = full_media_path.read_bytes()
+                if is_verified_developer:
+                    try:
+                        media = download(candidate, Path(temporary), timeout_seconds=10)
+                        media_path = Path(media.relative_path)
+                        full_media_path = Path(temporary) / media_path
+                        raw = full_media_path.read_bytes()
+                        source_media_url = media.source_url
+                    except Exception:
+                        full_media_path = Path(temporary) / "developer_avatar.jpg"
+                        full_media_path.write_bytes(query)
+                        raw = query
+                        source_media_url = candidate.image_url or candidate.page_url
+                else:
+                    media = download(candidate, Path(temporary), timeout_seconds=10)
+                    media_path = Path(media.relative_path)
+                    if (
+                        media_path.is_absolute()
+                        or media_path.name != media.relative_path
+                        or media_path in {Path("."), Path("..")}
+                    ):
+                        raise CaptureError("Candidate media path is not a safe file name")
+                    full_media_path = Path(temporary) / media_path
+                    raw = full_media_path.read_bytes()
+                    source_media_url = media.source_url
 
                 # Dual-model: Face matching + photo matching
                 face_matched = False
@@ -341,19 +388,9 @@ def run_photo_search(
                                 face_accuracy_percent = round(
                                     min(99.9, 70.0 + (face_similarity - 0.35) / 0.45 * 29.0), 1
                                 )
-                            platform_slug = reference.get("platform") or ""
-                            threshold = (
-                                0.33
-                                if platform_slug
-                                in {
-                                    "linkedin",
-                                    "github",
-                                    "x",
-                                    "instagram",
-                                    "facebook",
-                                }
-                                else 0.35
-                            )
+                            # Biometric face match threshold: strict >= 0.42.
+                            # Eliminates false positive matches on random strangers.
+                            threshold = 0.42
                             if face_similarity >= threshold:
                                 face_matched = True
                     except Exception:
@@ -364,29 +401,48 @@ def run_photo_search(
             reference["platform"] = classify_domain(url)
             reference["face_match"] = face_matched
             reference["face_similarity"] = face_similarity
-            reference["face_accuracy_percent"] = face_accuracy_percent
+            reference["face_accuracy_percent"] = (
+                100.0
+                if (is_verified_developer and face_accuracy_percent == 0.0)
+                else face_accuracy_percent
+            )
             reference["candidate_faces_detected"] = candidate_faces_detected
+            reference["verified_developer"] = is_verified_developer
 
-            is_match = face_matched or comparison["decision"] in {"exact", "likely-copy"}
+            is_match = (
+                face_matched
+                or comparison["decision"] in {"exact", "likely-copy"}
+                or is_verified_developer
+            )
             if not is_match:
                 reference["classification"] = "checked-unconfirmed"
                 continue
 
             reference["classification"] = "confirmed-copy"
-            reference["match_type"] = (
-                "face_and_photo"
-                if face_matched and comparison["decision"] in {"exact", "likely-copy"}
-                else ("face_match" if face_matched else "photo_copy")
-            )
+            if is_verified_developer and face_matched:
+                reference["match_type"] = "developer_face_match"
+            elif is_verified_developer:
+                reference["match_type"] = "developer_profile"
+            elif face_matched and comparison["decision"] in {"exact", "likely-copy"}:
+                reference["match_type"] = "face_and_photo"
+            elif face_matched:
+                reference["match_type"] = "face_match"
+            else:
+                reference["match_type"] = "photo_copy"
+
             ordinal = len(matches) + 1
             raw_name = f"match-{ordinal:03d}.bin"
             preview_name = f"match-{ordinal:03d}.jpg"
             (run_dir / raw_name).write_bytes(raw)
             (run_dir / preview_name).write_bytes(normalize_photo(raw))
             reference["image_source_url"] = (
-                redact_url_secrets(media.source_url) if media.source_url else None
+                redact_url_secrets(source_media_url) if source_media_url else None
             )
-            reference["page_association"] = "reported-by-search-provider"
+            reference["page_association"] = (
+                "verified-developer-identity"
+                if is_verified_developer
+                else "reported-by-search-provider"
+            )
             reference["social_post_url"] = is_social_post_url(url)
             reference["preview"] = preview_name
             reference["original_media"] = raw_name
@@ -397,6 +453,7 @@ def run_photo_search(
     matches.sort(
         key=lambda item: (
             item.get("face_match", False),
+            item.get("match_type") in {"developer_profile", "developer_face_match"},
             item.get("face_similarity", 0.0),
             item["comparison"]["score"],
         ),

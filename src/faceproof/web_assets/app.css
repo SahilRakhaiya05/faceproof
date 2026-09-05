@@ -632,6 +632,16 @@ input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 3
   border: 1px solid rgba(140, 166, 255, 0.4);
   color: var(--blue);
 }
+.platform-tag.devfolio {
+  background: rgba(55, 112, 255, 0.14);
+  border: 1px solid rgba(55, 112, 255, 0.45);
+  color: #639aff;
+}
+.platform-tag.huggingface {
+  background: rgba(255, 210, 30, 0.14);
+  border: 1px solid rgba(255, 210, 30, 0.45);
+  color: #ffd21e;
+}
 .platform-tag.linkedin {
   background: rgba(114, 232, 222, 0.12);
   border: 1px solid rgba(114, 232, 222, 0.4);
