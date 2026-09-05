@@ -662,6 +662,11 @@ input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 3
   border: 1px solid rgba(255, 161, 22, 0.45);
   color: #ffa116;
 }
+.platform-tag.wikipedia {
+  background: rgba(230, 235, 245, 0.12);
+  border: 1px solid rgba(200, 210, 230, 0.45);
+  color: #e2e8f0;
+}
 .platform-tag.social {
   background: rgba(255, 194, 92, 0.12);
   border: 1px solid rgba(255, 194, 92, 0.4);

@@ -51,6 +51,7 @@ from .search.tech_discovery import (
     extract_name_tokens,
     is_profile_consistent_with_subject,
     search_profiles_by_name,
+    search_wikipedia_profile,
 )
 
 MAX_BYTES = 25 * 1024 * 1024
@@ -85,6 +86,7 @@ def _candidate_priority(candidate: Any) -> tuple[int, int]:
     if getattr(candidate, "result_type", "") in {
         "verified_developer_profile",
         "name_search_profile",
+        "wikipedia_profile",
     }:
         return (0, 0)
     exact = bool(getattr(candidate, "exact_match", False))
@@ -100,6 +102,7 @@ def _candidate_priority(candidate: Any) -> tuple[int, int]:
         "devpost",
         "leetcode",
         "medium",
+        "wikipedia",
         "x",
         "instagram",
         "facebook",
@@ -118,6 +121,7 @@ def _candidate_priority(candidate: Any) -> tuple[int, int]:
             "devpost.",
             "leetcode.",
             "medium.",
+            "wikipedia.",
             "twitter.",
             "x.com",
             "instagram.",
@@ -332,34 +336,47 @@ def run_photo_search(
                 if not primary_avatar and tp.avatar_url and not tp.avatar_url.endswith(".svg"):
                     primary_avatar = tp.avatar_url
 
-        # Stage 2: Recursive targeted deep name search
-        if settings.serpapi_api_key and seed_names:
+        # Stage 2: Recursive targeted deep name search & Wikipedia knowledge verification
+        if seed_names:
             for s_name in sorted(seed_names):
                 parts = s_name.strip().split()
                 if len(parts) >= 2 and len(s_name.strip()) >= 5:
-                    emit(
-                        f"Stage 2: Recursive deep search for '{s_name}' across developer networks."
-                    )
-                    name_candidates = search_profiles_by_name(
-                        s_name,
-                        api_key=settings.serpapi_api_key,
-                        timeout_seconds=settings.http_timeout_seconds,
-                        primary_avatar=primary_avatar,
-                    )
-                    if name_candidates:
-                        emit(f"Discovered {len(name_candidates)} profiles for '{s_name}'.")
-                        for nc in name_candidates:
-                            candidates.append(nc)
-                            if nc.title:
-                                subject_tokens.update(extract_name_tokens(nc.title))
+                    try:
+                        wiki_cand = search_wikipedia_profile(
+                            s_name, timeout_seconds=settings.http_timeout_seconds
+                        )
+                        if wiki_cand:
+                            candidates.append(wiki_cand)
                             stage_2_profiles.append(
                                 {
-                                    "url": nc.normalized_url,
-                                    "platform": classify_domain(nc.normalized_url),
-                                    "seed_source": "name_search",
-                                    "title": nc.title,
+                                    "url": wiki_cand.normalized_url,
+                                    "platform": "wikipedia",
+                                    "seed_source": "wikipedia_registry",
+                                    "title": wiki_cand.title,
                                 }
                             )
+                    except Exception:
+                        pass
+
+                    if settings.serpapi_api_key:
+                        emit(f"Stage 2: Cross-platform identity resolution for '{s_name}'.")
+                        name_candidates = search_profiles_by_name(
+                            s_name,
+                            api_key=settings.serpapi_api_key,
+                            timeout_seconds=settings.http_timeout_seconds,
+                        )
+                        if name_candidates:
+                            emit(f"Located {len(name_candidates)} platform records for '{s_name}'.")
+                            for nc in name_candidates:
+                                candidates.append(nc)
+                                stage_2_profiles.append(
+                                    {
+                                        "url": nc.normalized_url,
+                                        "platform": classify_domain(nc.normalized_url),
+                                        "seed_source": "name_search",
+                                        "title": nc.title,
+                                    }
+                                )
     except Exception:
         pass
     for c in candidates[:2]:
@@ -409,40 +426,25 @@ def run_photo_search(
         reference["checked"] = True
         checked += 1
         total_eval = min(len(candidates), MAX_CANDIDATES)
-        emit(f"Evaluating candidate {checked}/{total_eval} with dual face + photo match.")
+        emit(f"Validating candidate {checked}/{total_eval} with neural face verification.")
         is_verified_developer = getattr(candidate, "result_type", "") in {
             "verified_developer_profile",
             "name_search_profile",
+            "wikipedia_profile",
         }
         try:
             with tempfile.TemporaryDirectory(prefix="photo-copy-") as temporary:
-                if is_verified_developer:
-                    try:
-                        media = download(candidate, Path(temporary), timeout_seconds=10)
-                        media_path = Path(media.relative_path)
-                        full_media_path = Path(temporary) / media_path
-                        raw = full_media_path.read_bytes()
-                        source_media_url = media.source_url
-                    except Exception:
-                        if getattr(candidate, "result_type", "") == "verified_developer_profile":
-                            full_media_path = Path(temporary) / "developer_avatar.jpg"
-                            full_media_path.write_bytes(query)
-                            raw = query
-                            source_media_url = candidate.image_url or candidate.page_url
-                        else:
-                            raise
-                else:
-                    media = download(candidate, Path(temporary), timeout_seconds=10)
-                    media_path = Path(media.relative_path)
-                    if (
-                        media_path.is_absolute()
-                        or media_path.name != media.relative_path
-                        or media_path in {Path("."), Path("..")}
-                    ):
-                        raise CaptureError("Candidate media path is not a safe file name")
-                    full_media_path = Path(temporary) / media_path
-                    raw = full_media_path.read_bytes()
-                    source_media_url = media.source_url
+                media = download(candidate, Path(temporary), timeout_seconds=10)
+                media_path = Path(media.relative_path)
+                if (
+                    media_path.is_absolute()
+                    or media_path.name != media.relative_path
+                    or media_path in {Path("."), Path("..")}
+                ):
+                    raise CaptureError("Candidate media path is not a safe file name")
+                full_media_path = Path(temporary) / media_path
+                raw = full_media_path.read_bytes()
+                source_media_url = media.source_url
 
                 # Dual-model: Face matching + photo matching
                 face_matched = False
@@ -460,17 +462,15 @@ def run_photo_search(
                                 for enc in cand_encodings
                             ]
                             face_similarity = float(max(scores))
-                            if face_similarity <= 0.15:
+                            if face_similarity < 0.20:
+                                face_accuracy_percent = round(max(0.0, face_similarity * 40.0), 1)
+                            elif face_similarity < 0.42:
                                 face_accuracy_percent = round(
-                                    max(0.0, (face_similarity + 0.1) * 20), 1
-                                )
-                            elif face_similarity < 0.35:
-                                face_accuracy_percent = round(
-                                    5.0 + (face_similarity - 0.15) / 0.20 * 65.0, 1
+                                    8.0 + (face_similarity - 0.20) / 0.22 * 50.0, 1
                                 )
                             else:
                                 face_accuracy_percent = round(
-                                    min(99.9, 70.0 + (face_similarity - 0.35) / 0.45 * 29.0), 1
+                                    min(99.9, 75.0 + (face_similarity - 0.42) / 0.45 * 24.9), 1
                                 )
                             # Biometric face match threshold: strict >= 0.42.
                             # Eliminates false positive matches on random strangers.
@@ -485,19 +485,12 @@ def run_photo_search(
             reference["platform"] = classify_domain(url)
             reference["face_match"] = face_matched
             reference["face_similarity"] = face_similarity
-            reference["face_accuracy_percent"] = (
-                100.0
-                if (is_verified_developer and face_accuracy_percent == 0.0)
-                else face_accuracy_percent
-            )
+            reference["face_accuracy_percent"] = face_accuracy_percent
             reference["candidate_faces_detected"] = candidate_faces_detected
             reference["verified_developer"] = is_verified_developer
 
-            is_match = (
-                face_matched
-                or comparison["decision"] in {"exact", "likely-copy"}
-                or is_verified_developer
-            )
+            # Authentic match requires face verification or perceptual whole-photo duplicate
+            is_match = face_matched or comparison["decision"] in {"exact", "likely-copy"}
             if not is_match:
                 reference["classification"] = "checked-unconfirmed"
                 continue
@@ -518,8 +511,6 @@ def run_photo_search(
             reference["classification"] = "confirmed-copy"
             if is_verified_developer and face_matched:
                 reference["match_type"] = "developer_face_match"
-            elif is_verified_developer:
-                reference["match_type"] = "developer_profile"
             elif face_matched and comparison["decision"] in {"exact", "likely-copy"}:
                 reference["match_type"] = "face_and_photo"
             elif face_matched:
@@ -562,7 +553,7 @@ def run_photo_search(
     matches.sort(
         key=lambda item: (
             item.get("face_match", False),
-            item.get("match_type") in {"developer_profile", "developer_face_match"},
+            item.get("match_type") in {"developer_face_match"},
             item.get("face_similarity", 0.0),
             item["comparison"]["score"],
         ),

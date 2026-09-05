@@ -94,15 +94,33 @@ def extract_identity_seeds(
         ):
             names.add(clean)
 
-    # Normalized handle variants
+    # Normalized handle variants: preserve authentic handles without truncating
     expanded_handles: set[str] = set()
+    generic_noise = {
+        "admin",
+        "developer",
+        "user",
+        "guest",
+        "test",
+        "root",
+        "team",
+        "help",
+        "info",
+        "support",
+        "community",
+        "official",
+        "contact",
+        "media",
+        "press",
+        "home",
+        "explore",
+        "trending",
+        "topics",
+    }
     for h in handles:
         clean = h.strip().lstrip("@")
-        if clean:
+        if clean and len(clean) >= 3 and clean.lower() not in generic_noise:
             expanded_handles.add(clean)
-            stripped = re.sub(r"\d+$", "", clean)
-            if len(stripped) >= 3:
-                expanded_handles.add(stripped)
 
     return expanded_handles, names
 
@@ -171,18 +189,23 @@ def is_profile_consistent_with_subject(
     handle_tokens = extract_name_tokens(parts.path.replace("-", " ").replace("_", " "))
     cand_tokens = title_tokens | handle_tokens
 
-    # Direct token overlap
-    if cand_tokens & subject_tokens:
+    overlap = cand_tokens & subject_tokens
+    if not overlap:
+        # Check substring match for distinctive tokens
+        full_str = f"{title_text.lower()} {parts.path.lower()}"
+        return any(len(st) >= 5 and st in full_str for st in subject_tokens)
+
+    # Distinctive token match (length >= 5, e.g. "bhattacharyya", "rakhaiya")
+    if any(len(t) >= 5 for t in overlap):
         return True
 
-    # Substring in title or handle path
-    full_str = f"{title_text.lower()} {parts.path.lower()}"
-    for st in subject_tokens:
-        if len(st) >= 3 and st in full_str:
-            return True
+    # Multi-token match (at least 2 overlapping tokens)
+    if len(overlap) >= 2:
+        return True
 
-    # If the candidate profile has identified tokens belonging to someone else, reject
-    return not cand_tokens
+    # Single short token: only valid if subject has no distinctive multi-character tokens
+    distinctive_subject = {t for t in subject_tokens if len(t) >= 5}
+    return not (distinctive_subject and not (cand_tokens & distinctive_subject))
 
 
 def discover_tech_profiles(
@@ -204,6 +227,20 @@ def discover_tech_profiles(
 
     candidate_handles = set(seed_handles)
     candidate_names = set(seed_names)
+
+    def _matches_seed_identity(cand_name: str | None) -> bool:
+        if not cand_name or not seed_names:
+            return True
+        c_tokens = extract_name_tokens(cand_name)
+        for sn in seed_names:
+            s_tokens = extract_name_tokens(sn)
+            distinctive = {t for t in s_tokens if len(t) >= 5}
+            if distinctive:
+                if c_tokens & distinctive:
+                    return True
+            elif len(c_tokens & s_tokens) >= min(2, len(s_tokens)):
+                return True
+        return False
 
     def add(
         platform: str,
@@ -268,6 +305,8 @@ def discover_tech_profiles(
                 if resp.status_code == 200:
                     gh = resp.json()
                     name = gh.get("name") or handle
+                    if seed_names and not _matches_seed_identity(gh.get("name")):
+                        continue
                     candidate_names.add(name)
                     avatar = gh.get("avatar_url")
                     bio = gh.get("bio")
@@ -450,13 +489,16 @@ def discover_tech_profiles(
                                 first = u.get("first_name", "")
                                 last = u.get("last_name", "")
                                 u_name = f"{first} {last}".strip() or handle
+                                if seed_names and not _matches_seed_identity(u_name):
+                                    continue
                                 u_bio = u.get("short_bio") or u.get("bio")
+                                u_avatar = u.get("profile_picture") or u.get("avatar_url")
                                 candidate_names.add(u_name)
                                 add(
                                     "devfolio",
                                     f"https://devfolio.co/@{handle}",
                                     f"{u_name} (@{handle}) · Devfolio",
-                                    None,
+                                    u_avatar,
                                     u_bio,
                                     handle,
                                     u_name,
@@ -477,6 +519,9 @@ def discover_tech_profiles(
                 if resp.status_code == 200:
                     hf = resp.json()
                     name = hf.get("fullname") or handle
+                    if seed_names and not _matches_seed_identity(hf.get("fullname")):
+                        continue
+                    candidate_names.add(name)
                     avatar = hf.get("avatarUrl")
                     if avatar and avatar.startswith("/"):
                         avatar = f"https://huggingface.co{avatar}"
@@ -568,29 +613,6 @@ def discover_tech_profiles(
                 except Exception:
                     pass
 
-        # Propagate verified photo avatar if available across identity cluster
-        primary_avatar = next(
-            (
-                p.avatar_url
-                for p in discovered
-                if p.avatar_url and not p.avatar_url.endswith(".svg")
-            ),
-            next((p.avatar_url for p in discovered if p.avatar_url), None),
-        )
-        if primary_avatar:
-            discovered = [
-                TechProfile(
-                    platform=p.platform,
-                    url=p.url,
-                    title=p.title,
-                    avatar_url=p.avatar_url or primary_avatar,
-                    bio=p.bio,
-                    handle=p.handle,
-                    name=p.name,
-                    verified=p.verified,
-                )
-                for p in discovered
-            ]
     finally:
         if owns_client:
             http.close()
@@ -598,23 +620,163 @@ def discover_tech_profiles(
     return discovered
 
 
-def _resolve_profile_avatar(url: str, *, fallback_avatar: str | None = None) -> str | None:
-    """Resolve direct avatar URL for common developer/social platforms."""
-    gh_match = re.search(r"github\.com/([a-zA-Z0-9_-]+)", url, re.I)
-    if gh_match:
-        gh_handle = gh_match.group(1)
-        if gh_handle.lower() not in {
-            "topics",
-            "trending",
-            "explore",
-            "settings",
-            "about",
-            "orgs",
-            "features",
-        }:
-            return f"https://github.com/{gh_handle}.png"
+def _resolve_candidate_avatar(url: str, *, http: httpx.Client | None = None) -> str | None:
+    """Extract authentic profile avatar URL for developer and knowledge platforms."""
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
 
-    return fallback_avatar
+        # 1. GitHub avatar
+        if "github.com" in host:
+            gh_match = re.search(r"github\.com/([a-zA-Z0-9_-]+)", url, re.I)
+            if gh_match:
+                handle = gh_match.group(1)
+                if handle.lower() not in {
+                    "topics",
+                    "trending",
+                    "explore",
+                    "settings",
+                    "about",
+                    "orgs",
+                    "features",
+                    "pricing",
+                    "security",
+                }:
+                    return f"https://github.com/{handle}.png"
+
+        # 2. Wikipedia lead portrait
+        if "wikipedia.org" in host and http:
+            wiki_m = re.search(r"([a-z]{2,3})\.wikipedia\.org/wiki/([^/?#]+)", url, re.I)
+            if wiki_m:
+                lang, article = wiki_m.group(1), wiki_m.group(2)
+                try:
+                    resp = http.get(
+                        f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{article}",
+                        timeout=4.0,
+                    )
+                    if resp.status_code == 200:
+                        wdata = resp.json()
+                        orig = wdata.get("originalimage", {}).get("source")
+                        thumb = wdata.get("thumbnail", {}).get("source")
+                        return orig or thumb
+                except Exception:
+                    pass
+
+        # 3. Hugging Face avatar
+        if "huggingface.co" in host and http:
+            hf_m = re.search(r"huggingface\.co/([a-zA-Z0-9_-]+)", url, re.I)
+            if hf_m:
+                handle = hf_m.group(1)
+                if handle.lower() not in {
+                    "models",
+                    "datasets",
+                    "spaces",
+                    "docs",
+                    "blog",
+                    "pricing",
+                }:
+                    try:
+                        resp = http.get(
+                            f"https://huggingface.co/api/users/{handle}/overview",
+                            timeout=4.0,
+                        )
+                        if resp.status_code == 200:
+                            av = resp.json().get("avatarUrl")
+                            if av:
+                                return f"https://huggingface.co{av}" if av.startswith("/") else av
+                    except Exception:
+                        pass
+
+        # 4. OpenGraph image for public web pages (excluding login-walled social networks)
+        if http and not any(k in host for k in ("linkedin.com", "facebook.com", "instagram.com")):
+            try:
+                resp = http.get(url, timeout=3.5)
+                if resp.status_code == 200:
+                    m = re.search(
+                        r'<meta\s+(?:property|name)=["\'](?:og:image|twitter:image)["\']\s+content=["\']([^"\']+)["\']',
+                        resp.text,
+                        re.I,
+                    )
+                    if m and m.group(1).startswith("http"):
+                        return m.group(1)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return None
+
+
+def search_wikipedia_profile(
+    name: str,
+    *,
+    client: httpx.Client | None = None,
+    timeout_seconds: float = 6.0,
+) -> SearchCandidate | None:
+    """Search Wikipedia for subject identity and extract article and lead portrait."""
+    if not name or len(name.strip().split()) < 2:
+        return None
+    clean = name.strip()
+    owns_client = client is None
+    http = client or httpx.Client(
+        headers={"User-Agent": "FaceProof/1.0 (biometric verification research)"},
+        follow_redirects=True,
+        timeout=timeout_seconds,
+    )
+    try:
+        resp = http.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={
+                "action": "opensearch",
+                "search": clean,
+                "limit": 2,
+                "namespace": 0,
+                "format": "json",
+            },
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if len(data) >= 4 and data[1] and data[3]:
+                title = data[1][0]
+                wiki_url = data[3][0]
+                target_tokens = extract_name_tokens(clean)
+                title_tokens = extract_name_tokens(title)
+                distinctive = {t for t in target_tokens if len(t) >= 5}
+                is_match = (
+                    bool(distinctive and (title_tokens & distinctive))
+                    or len(title_tokens & target_tokens) >= 2
+                )
+                if is_match:
+                    sum_resp = http.get(
+                        f"https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
+                    )
+                    if sum_resp.status_code == 200:
+                        sdata = sum_resp.json()
+                        img_url = sdata.get("originalimage", {}).get("source") or sdata.get(
+                            "thumbnail", {}
+                        ).get("source")
+                        return SearchCandidate(
+                            provider="wikipedia",
+                            rank=0,
+                            page_url=wiki_url,
+                            normalized_url=wiki_url,
+                            title=f"{sdata.get('title', title)} · Wikipedia",
+                            source="wikipedia",
+                            image_url=img_url,
+                            thumbnail_url=img_url,
+                            provider_score=1.0,
+                            exact_match=False,
+                            result_type="wikipedia_profile",
+                            post_id=None,
+                        )
+    except Exception:
+        pass
+    finally:
+        if owns_client:
+            http.close()
+    return None
 
 
 def search_profiles_by_name(
@@ -639,10 +801,13 @@ def search_profiles_by_name(
     )
     candidates: list[SearchCandidate] = []
     clean_name = name.strip()
+    target_tokens = extract_name_tokens(clean_name)
+    distinctive_tokens = {t for t in target_tokens if len(t) >= 5}
     query = (
         f'"{clean_name}" '
-        "(site:github.com OR site:linkedin.com/in OR site:devfolio.co OR "
-        "site:huggingface.co OR site:kaggle.com OR site:devpost.com OR site:leetcode.com)"
+        "(site:github.com OR site:devfolio.co OR "
+        "site:huggingface.co OR site:kaggle.com OR site:devpost.com OR site:leetcode.com "
+        "OR site:wikipedia.org)"
     )
     try:
         resp = http.get(
@@ -660,18 +825,27 @@ def search_profiles_by_name(
                 link = item.get("link")
                 if not link or not link.startswith("https://"):
                     continue
+                title = item.get("title") or ""
+                # Strict name filtering: reject strangers whose title does not match subject
+                title_tokens = extract_name_tokens(title)
+                overlap = title_tokens & target_tokens
+                if distinctive_tokens:
+                    if not (overlap & distinctive_tokens):
+                        continue
+                elif len(overlap) < min(2, len(target_tokens)):
+                    continue
+
                 try:
                     norm = normalize_page_url(link)
                 except ValueError:
                     norm = link
-                title = item.get("title") or norm
-                avatar = _resolve_profile_avatar(norm, fallback_avatar=primary_avatar)
+                avatar = _resolve_candidate_avatar(norm, http=http)
                 cand = SearchCandidate(
                     provider="name-search",
                     rank=idx,
                     page_url=link,
                     normalized_url=norm,
-                    title=title,
+                    title=title or norm,
                     source=platform_name(norm) or "web",
                     image_url=avatar,
                     thumbnail_url=avatar,

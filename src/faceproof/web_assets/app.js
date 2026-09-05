@@ -171,6 +171,7 @@ function renderPhotoCopyResult(result) {
     kaggle: 0,
     devpost: 0,
     leetcode: 0,
+    wikipedia: 0,
     social: 0,
     web: 0,
   };
@@ -183,6 +184,7 @@ function renderPhotoCopyResult(result) {
     else if (p.includes("kaggle")) platformCounts.kaggle++;
     else if (p.includes("devpost")) platformCounts.devpost++;
     else if (p.includes("leetcode")) platformCounts.leetcode++;
+    else if (p.includes("wikipedia")) platformCounts.wikipedia++;
     else if (["x", "twitter", "reddit", "bluesky", "youtube", "facebook", "instagram", "tiktok"].some(s => p.includes(s))) platformCounts.social++;
     else platformCounts.web++;
   }
@@ -200,25 +202,23 @@ function renderPhotoCopyResult(result) {
     const isKaggle = platform.includes("kaggle");
     const isDevpost = platform.includes("devpost");
     const isLeetcode = platform.includes("leetcode");
+    const isWikipedia = platform.includes("wikipedia");
     const isSocial = ["x", "twitter", "reddit", "bluesky", "youtube", "facebook", "instagram", "tiktok"].some(s => platform.includes(s));
-    const platformClass = isDevfolio ? "devfolio" : isHuggingface ? "huggingface" : isGithub ? "github" : isLinkedin ? "linkedin" : isKaggle ? "kaggle" : isDevpost ? "devpost" : isLeetcode ? "leetcode" : isSocial ? "social" : "web";
-    const platformLabel = isDevfolio ? "Devfolio" : isHuggingface ? "Hugging Face" : isGithub ? "GitHub" : isLinkedin ? "LinkedIn" : isKaggle ? "Kaggle" : isDevpost ? "Devpost" : isLeetcode ? "LeetCode" : isSocial ? (match.platform?.toUpperCase() || "Social") : "Web Page";
-    const categoryAttr = isDevfolio ? "devfolio" : isHuggingface ? "huggingface" : isGithub ? "github" : isLinkedin ? "linkedin" : isKaggle ? "kaggle" : isDevpost ? "devpost" : isLeetcode ? "leetcode" : isSocial ? "social" : "web";
+    const platformClass = isDevfolio ? "devfolio" : isHuggingface ? "huggingface" : isGithub ? "github" : isLinkedin ? "linkedin" : isKaggle ? "kaggle" : isDevpost ? "devpost" : isLeetcode ? "leetcode" : isWikipedia ? "wikipedia" : isSocial ? "social" : "web";
+    const platformLabel = isDevfolio ? "Devfolio" : isHuggingface ? "Hugging Face" : isGithub ? "GitHub" : isLinkedin ? "LinkedIn" : isKaggle ? "Kaggle" : isDevpost ? "Devpost" : isLeetcode ? "LeetCode" : isWikipedia ? "Wikipedia" : isSocial ? (match.platform?.toUpperCase() || "Social") : "Web Page";
+    const categoryAttr = isDevfolio ? "devfolio" : isHuggingface ? "huggingface" : isGithub ? "github" : isLinkedin ? "linkedin" : isKaggle ? "kaggle" : isDevpost ? "devpost" : isLeetcode ? "leetcode" : isWikipedia ? "wikipedia" : isSocial ? "social" : "web";
 
     const faceAcc = match.face_accuracy_percent != null && match.face_accuracy_percent > 0 ? match.face_accuracy_percent : null;
     const photoScore = comparison.score != null ? comparison.score : null;
 
     let badgeClass = "visual-match";
-    let badgeText = "CONFIRMED COPY";
+    let badgeText = "VISUAL PHOTO COPY";
     if (match.match_type === "developer_face_match") {
       badgeClass = "face-match";
       badgeText = "VERIFIED DEVELOPER + FACE";
-    } else if (match.match_type === "developer_profile" || match.verified_developer) {
-      badgeClass = "face-match";
-      badgeText = "VERIFIED DEVELOPER";
     } else if (match.face_match) {
       badgeClass = "face-match";
-      badgeText = "VERIFIED FACE MATCH";
+      badgeText = "NEURAL FACE MATCH";
     }
 
     return `<article class="photo-match-card" data-category="${categoryAttr}">
@@ -294,6 +294,7 @@ function renderPhotoCopyResult(result) {
       ${platformCounts.kaggle > 0 ? `<button class="filter-tab" data-filter="kaggle">Kaggle (${platformCounts.kaggle})</button>` : ""}
       ${platformCounts.devpost > 0 ? `<button class="filter-tab" data-filter="devpost">Devpost (${platformCounts.devpost})</button>` : ""}
       ${platformCounts.leetcode > 0 ? `<button class="filter-tab" data-filter="leetcode">LeetCode (${platformCounts.leetcode})</button>` : ""}
+      ${platformCounts.wikipedia > 0 ? `<button class="filter-tab" data-filter="wikipedia">Wikipedia (${platformCounts.wikipedia})</button>` : ""}
       ${platformCounts.social > 0 ? `<button class="filter-tab" data-filter="social">Social Media (${platformCounts.social})</button>` : ""}
       ${platformCounts.web > 0 ? `<button class="filter-tab" data-filter="web">Web &amp; Media (${platformCounts.web})</button>` : ""}
     </div>` : "";
@@ -303,23 +304,23 @@ function renderPhotoCopyResult(result) {
   const provSection = provGraph && (provGraph.identity_seeds?.names?.length || provGraph.stage_2_recursive?.length) ? `
     <div class="provenance-card">
       <div class="provenance-card-header">
-        <span class="provenance-card-title">Multi-Hop Provenance Graph · Recursive Identity Traversal</span>
+        <span class="provenance-card-title">Cryptographic Provenance Graph · Recursive Identity Traversal</span>
         <span class="reference-badge active">${escapeHtml(String(provGraph.nodes_count || 0))} nodes · ${escapeHtml(String(provGraph.edges_count || 0))} edges</span>
       </div>
       <div class="provenance-nodes">
-        <div class="provenance-node"><span class="prov-dot query"></span> Query Photo</div>
+        <div class="provenance-node"><span class="prov-dot query"></span> Input Query Photo</div>
         <span class="provenance-arrow">➔</span>
-        ${(provGraph.identity_seeds?.names || []).map(n => `<div class="provenance-node"><span class="prov-dot seed"></span> Identity: ${escapeHtml(n)}</div>`).join("")}
+        ${(provGraph.identity_seeds?.names || []).map(n => `<div class="provenance-node"><span class="prov-dot seed"></span> Subject: ${escapeHtml(n)}</div>`).join("")}
         ${(provGraph.stage_2_recursive?.length) ? `<span class="provenance-arrow">➔</span>` : ""}
-        ${(provGraph.stage_2_recursive || []).slice(0, 6).map(p => `<div class="provenance-node"><span class="prov-dot ${escapeHtml(p.status)}"></span> ${escapeHtml(p.platform?.toUpperCase() || "WEB")}</div>`).join("")}
+        ${(provGraph.stage_2_recursive || []).slice(0, 8).map(p => `<div class="provenance-node"><span class="prov-dot ${escapeHtml(p.status)}"></span> ${escapeHtml(p.platform?.toUpperCase() || "WEB")}</div>`).join("")}
       </div>
     </div>` : "";
 
   output.innerHTML = `<header class="photo-proof-header">
     <div>
-      <p class="section-kicker">NEURAL FACE VERIFICATION</p>
-      <h3>${matches.length} matching web links found across GitHub, LinkedIn, social & web</h3>
-      <p class="section-lead">These pages contain matching faces or images that passed independent neural & visual verification.</p>
+      <p class="section-kicker">BIOMETRIC IDENTITY VERIFICATION</p>
+      <h3>${matches.length ? `${matches.length} verified web record${matches.length === 1 ? "" : "s"} authenticated` : "No verified biometric matches found"}</h3>
+      <p class="section-lead">${matches.length ? "Authenticated across independent neural face embeddings (YuNet + SFace) and cryptographic visual hashes." : "Candidate pages were evaluated with independent biometric face recognition; none matched the subject."}</p>
     </div>
     <div class="header-tags">
       <span class="status-tag status-tag-recorded">${escapeHtml(status)}</span>

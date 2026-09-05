@@ -204,10 +204,10 @@ def test_discover_tech_profiles_with_mocked_endpoints() -> None:
     assert "x" in platforms
     assert "huggingface" in platforms
 
-    # Verify primary avatar propagation across identity cluster
-    for p in profiles:
-        assert p.avatar_url is not None
-        assert "avatars.githubusercontent.com" in p.avatar_url or "huggingface.co" in p.avatar_url
+    gh_profile = next(p for p in profiles if p.platform == "github")
+    assert gh_profile.avatar_url == "https://avatars.githubusercontent.com/u/144577420?v=4"
+    hf_profile = next(p for p in profiles if p.platform == "huggingface")
+    assert hf_profile.avatar_url == "https://huggingface.co/avatars/custom.svg"
 
 
 def test_strict_face_match_threshold_rejects_strangers_and_confirms_developers(
@@ -272,11 +272,13 @@ def test_strict_face_match_threshold_rejects_strangers_and_confirms_developers(
 
     def download(_candidate: SearchCandidate, destination: Path, **_kwargs: object) -> CapturedFile:
         path = destination / "candidate.jpg"
-        path.write_bytes(cand_bytes)
+        is_devfolio = "devfolio" in getattr(_candidate, "normalized_url", "")
+        img_data = query if is_devfolio else cand_bytes
+        path.write_bytes(img_data)
         return CapturedFile(
             relative_path=path.name,
             sha256="0" * 64,
-            byte_size=len(cand_bytes),
+            byte_size=len(img_data),
             media_type="image/jpeg",
             source_url="https://cdn.example.test/image.jpg",
         )
@@ -308,12 +310,11 @@ def test_strict_face_match_threshold_rejects_strangers_and_confirms_developers(
     # The stranger must NOT be in matches
     match_urls = [m["url"] for m in result["matches"]]
     assert "https://in.linkedin.com/in/seemanth-kulal" not in match_urls
-    # The verified developer profile MUST be in matches
+    # The verified developer profile with matching photo MUST be in matches
     assert "https://devfolio.co/@sahilrakhaiya" in match_urls
     devfolio_match = next(
         m for m in result["matches"] if m["url"] == "https://devfolio.co/@sahilrakhaiya"
     )
-    assert devfolio_match["match_type"] == "developer_profile"
     assert devfolio_match["classification"] == "confirmed-copy"
 
     # Verify stranger classification was marked checked-unconfirmed
@@ -394,6 +395,11 @@ def test_platform_classification_kaggle_devpost_leetcode() -> None:
     assert classify_domain("https://leetcode.com/u/rajbhattacharyya") == "leetcode"
     assert is_social_profile_url("https://leetcode.com/u/rajbhattacharyya") is True
 
+    assert platform_name("https://en.wikipedia.org/wiki/Narendra_Modi") == "wikipedia"
+    assert classify_domain("https://en.wikipedia.org/wiki/Narendra_Modi") == "wikipedia"
+    assert is_social_profile_url("https://en.wikipedia.org/wiki/Narendra_Modi") is True
+    assert is_social_profile_url("https://en.wikipedia.org/wiki/Special:Search") is False
+
 
 @respx.mock
 def test_search_profiles_by_name() -> None:
@@ -405,11 +411,15 @@ def test_search_profiles_by_name() -> None:
             "organic_results": [
                 {
                     "link": "https://github.com/RajBhattacharyya",
-                    "title": "RajBhattacharyya - GitHub",
+                    "title": "RajBhattacharyya (Raj Bhattacharyya) - GitHub",
                 },
                 {
                     "link": "https://devfolio.co/@raj-bhattacharyya18",
                     "title": "Raj Bhattacharyya · Devfolio",
+                },
+                {
+                    "link": "https://www.linkedin.com/in/kimberly-follmuth-123",
+                    "title": "Kimberly Follmuth - Director of Strategic Initiatives",
                 },
             ]
         },
@@ -418,17 +428,107 @@ def test_search_profiles_by_name() -> None:
     candidates = search_profiles_by_name(
         "Raj Bhattacharyya",
         api_key="mock_key",
-        primary_avatar="https://example.com/verified_avatar.jpg",
     )
 
+    # Kimberly Follmuth is rejected because title does not match subject name tokens
     assert len(candidates) == 2
     gh_cand = next(c for c in candidates if "github.com" in c.normalized_url)
     assert gh_cand.image_url == "https://github.com/RajBhattacharyya.png"
     assert gh_cand.result_type == "name_search_profile"
 
     dev_cand = next(c for c in candidates if "devfolio.co" in c.normalized_url)
-    assert dev_cand.image_url == "https://example.com/verified_avatar.jpg"
+    # Devfolio without og:image does not forge a fake avatar
+    assert dev_cand.image_url is None
     assert dev_cand.result_type == "name_search_profile"
+
+
+def test_profile_consistency_rejects_strangers() -> None:
+    from faceproof.search.tech_discovery import is_profile_consistent_with_subject
+
+    subject_tokens = {"raj", "bhattacharyya"}
+
+    # Authentic matches
+    assert (
+        is_profile_consistent_with_subject(
+            "https://github.com/RajBhattacharyya",
+            "Raj Bhattacharyya · GitHub",
+            subject_tokens,
+        )
+        is True
+    )
+    assert (
+        is_profile_consistent_with_subject(
+            "https://devfolio.co/@raj-bhattacharyya18",
+            "Raj Bhattacharyya · Devfolio",
+            subject_tokens,
+        )
+        is True
+    )
+
+    # Strangers with unrelated names
+    assert (
+        is_profile_consistent_with_subject(
+            "https://www.linkedin.com/in/kimberly-follmuth",
+            "Kimberly Follmuth",
+            subject_tokens,
+        )
+        is False
+    )
+    assert (
+        is_profile_consistent_with_subject(
+            "https://www.linkedin.com/in/david-barrett",
+            "David Barrett",
+            subject_tokens,
+        )
+        is False
+    )
+
+    # Strangers sharing only a 3-letter first name ("raj") without the distinctive surname
+    assert (
+        is_profile_consistent_with_subject(
+            "https://www.linkedin.com/in/avinash-raj",
+            "Avinash Raj",
+            subject_tokens,
+        )
+        is False
+    )
+    assert (
+        is_profile_consistent_with_subject(
+            "https://github.com/Raj",
+            "raj deenoo · GitHub",
+            subject_tokens,
+        )
+        is False
+    )
+
+
+@respx.mock
+def test_search_wikipedia_profile() -> None:
+    from faceproof.search.tech_discovery import search_wikipedia_profile
+
+    respx.get("https://en.wikipedia.org/w/api.php").respond(
+        status_code=200,
+        json=[
+            "Narendra Modi",
+            ["Narendra Modi"],
+            ["Prime Minister of India"],
+            ["https://en.wikipedia.org/wiki/Narendra_Modi"],
+        ],
+    )
+    respx.get("https://en.wikipedia.org/api/rest_v1/page/summary/Narendra%20Modi").respond(
+        status_code=200,
+        json={
+            "title": "Narendra Modi",
+            "thumbnail": {"source": "https://upload.wikimedia.org/modi_thumb.jpg"},
+            "originalimage": {"source": "https://upload.wikimedia.org/modi_orig.jpg"},
+        },
+    )
+
+    cand = search_wikipedia_profile("Narendra Modi")
+    assert cand is not None
+    assert cand.source == "wikipedia"
+    assert cand.result_type == "wikipedia_profile"
+    assert cand.image_url == "https://upload.wikimedia.org/modi_orig.jpg"
 
 
 def test_provenance_graph_in_photo_search(tmp_path: Path) -> None:

@@ -25,6 +25,9 @@ SOCIAL_HOSTS = frozenset(
         "reddit.com",
         "tiktok.com",
         "twitter.com",
+        "wikipedia.org",
+        "www.wikipedia.org",
+        "en.wikipedia.org",
         "x.com",
         "www.devfolio.co",
         "www.devpost.com",
@@ -61,6 +64,7 @@ SUPPORTED_PLATFORMS = frozenset(
         "medium",
         "reddit",
         "tiktok",
+        "wikipedia",
         "x",
         "youtube",
     }
@@ -326,6 +330,7 @@ def platform_name(url: str) -> str | None:
         ("tiktok.com", "tiktok"),
         ("facebook.com", "facebook"),
         ("bsky.app", "bluesky"),
+        ("wikipedia.org", "wikipedia"),
         ("youtube.com", "youtube"),
         ("youtu.be", "youtube"),
     )
@@ -347,6 +352,23 @@ def is_social_profile_url(url: str) -> bool:
     path = parts.path.rstrip("/")
     segments = [segment for segment in path.split("/") if segment]
     platform = platform_name(url)
+    if platform == "wikipedia":
+        return (
+            len(segments) == 2
+            and segments[0].casefold() == "wiki"
+            and not any(
+                segments[1].startswith(prefix)
+                for prefix in (
+                    "Special:",
+                    "Help:",
+                    "Talk:",
+                    "Wikipedia:",
+                    "Portal:",
+                    "Category:",
+                    "File:",
+                )
+            )
+        )
     if platform == "github":
         reserved = {
             "about",
