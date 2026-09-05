@@ -321,3 +321,61 @@ def test_strict_face_match_threshold_rejects_strangers_and_confirms_developers(
         r for r in result["references"] if r["url"] == "https://in.linkedin.com/in/seemanth-kulal"
     )
     assert stranger_ref["classification"] == "checked-unconfirmed"
+
+
+def test_extract_name_tokens_and_profile_consistency() -> None:
+    from faceproof.search.tech_discovery import (
+        extract_name_tokens,
+        is_profile_consistent_with_subject,
+    )
+
+    tokens = extract_name_tokens("RajBhattacharyya (Raj Bhattacharyya) · GitHub")
+    assert "raj" in tokens
+    assert "bhattacharyya" in tokens
+    assert "github" not in tokens
+
+    subject = {"raj", "bhattacharyya"}
+    # Real profile matching subject
+    assert (
+        is_profile_consistent_with_subject(
+            "https://github.com/RajBhattacharyya",
+            "RajBhattacharyya (Raj Bhattacharyya) · GitHub",
+            subject,
+        )
+        is True
+    )
+    assert (
+        is_profile_consistent_with_subject(
+            "https://in.linkedin.com/in/rajbhattacharyya2004",
+            "Raj Bhattacharyya - Machine Learning / Artificial ...",
+            subject,
+        )
+        is True
+    )
+
+    # Third-party profile where face appeared in sidebar/connections
+    assert (
+        is_profile_consistent_with_subject(
+            "https://in.linkedin.com/in/udita-bhaskar-709842244",
+            "Udita Bhaskar - -- | LinkedIn",
+            subject,
+        )
+        is False
+    )
+    assert (
+        is_profile_consistent_with_subject(
+            "https://in.linkedin.com/in/debabratamaity",
+            "Debabrata Maity - Software Developer | LinkedIn",
+            subject,
+        )
+        is False
+    )
+
+
+def test_evm_helpers() -> None:
+    from faceproof.chain import explorer_url_for_tx, network_name_for_chain_id
+
+    assert "sepolia.etherscan.io" in explorer_url_for_tx(11155111, "0x123abc")
+    assert "sepolia.basescan.org" in explorer_url_for_tx(84532, "0x123abc")
+    assert network_name_for_chain_id(11155111) == "Ethereum Sepolia"
+    assert network_name_for_chain_id(84532) == "Base Sepolia"

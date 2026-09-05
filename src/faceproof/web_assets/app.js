@@ -271,23 +271,51 @@ function renderPhotoCopyResult(result) {
       ${platformCounts.web > 0 ? `<button class="filter-tab" data-filter="web">Web &amp; Media (${platformCounts.web})</button>` : ""}
     </div>` : "";
 
-  const referenceSection = references.length ? `<section class="photo-reference-section"><div class="photo-reference-heading"><span class="section-kicker">ALL WEB SEARCH REFERENCES</span><strong>${escapeHtml(references.length)} unique HTTPS pages found</strong></div><p class="photo-reference-note">These links were returned by the live web reverse search. Verified matches are anchored to the blockchain record.</p><div class="photo-reference-list">${referenceRows}</div></section>` : "";
+  const evmReceipt = result?.evm_receipt;
 
-  output.innerHTML = `<div class="outcome-hero ${matches.length ? "" : "warn"}">
-    <div class="outcome-top"><div><span class="section-kicker">RUN ${escapeHtml(result.run_id)}</span><h3>${matches.length ? `${matches.length} matching web link${matches.length === 1 ? "" : "s"} found across GitHub, LinkedIn, social &amp; web` : "No confirmed web copies"}</h3>
-    <p>${matches.length ? "These pages contain matching faces or images that passed independent neural & visual verification." : `The provider returned ${escapeHtml(result.returned_image_references ?? 0)} image references; none passed the local verification. All retained page links are listed below. No proof block was created.`}</p></div><span class="outcome-badge ${matches.length ? "completed" : "inconclusive"}">${status}</span></div></div>
-    <div class="photo-scan-note"><span class="section-kicker">NEURAL FACE VERIFICATION</span><strong>${escapeHtml(faceScanText)}</strong><small>Evaluates candidate faces independently with SFace cosine similarity and perceptual hashing.</small></div>
-    ${filterTabs}
-    ${matches.length ? `<section class="photo-match-list">${links}</section>` : ""}
-    ${referenceSection}
-    <section class="photo-proof-summary"><div class="fact-grid">
-      <div class="fact"><span>References returned</span><strong>${escapeHtml(result.returned_image_references ?? 0)}</strong></div>
-      <div class="fact"><span>Matches confirmed</span><strong>${escapeHtml(matches.length)}</strong></div>
-      <div class="fact"><span>Images checked</span><strong>${escapeHtml(result.checked_image_references ?? 0)}</strong></div>
-      <div class="fact"><span>Search ID</span><strong>${escapeHtml(shortHash(result.search_id))}</strong></div>
+  output.innerHTML = `<header class="photo-proof-header">
+    <div>
+      <p class="section-kicker">NEURAL FACE VERIFICATION</p>
+      <h3>${matches.length} matching web links found across GitHub, LinkedIn, social & web</h3>
+      <p class="section-lead">These pages contain matching faces or images that passed independent neural & visual verification.</p>
     </div>
-    <div class="photo-proof-network"><span>Cryptographic Proof</span><strong>${receipt ? "Tamper-Evident SHA-256 Blockchain Commitment" : "Not created"}</strong></div>
-    ${receipt ? `<div class="label-warning">BLOCK ${escapeHtml(receipt.block_index)} · COMMITMENT ${escapeHtml(shortHash(receipt.block_hash))} · ${escapeHtml(receipt.network)} · Cryptographically sealed proof of discovery.</div>` : ""}
+    <div class="header-tags">
+      <span class="status-tag status-tag-recorded">${escapeHtml(status)}</span>
+    </div>
+  </header>
+  <div class="face-scan-banner">
+    <div class="face-scan-icon">👤</div>
+    <div class="face-scan-info">
+      <strong>NEURAL FACE VERIFICATION</strong>
+      <span>YuNet + SFace · 128D ephemeral encoding · Dual face & visual matching active</span>
+      <small>Evaluates candidate faces independently with SFace cosine similarity and perceptual hashing.</small>
+    </div>
+  </div>
+  ${filterTabs}
+  ${matches.length ? `<section class="photo-match-list">${links}</section>` : ""}
+  ${referenceSection}
+  <section class="photo-proof-summary"><div class="fact-grid">
+    <div class="fact"><span>References returned</span><strong>${escapeHtml(result.returned_image_references ?? 0)}</strong></div>
+    <div class="fact"><span>Matches confirmed</span><strong>${escapeHtml(matches.length)}</strong></div>
+    <div class="fact"><span>Images checked</span><strong>${escapeHtml(result.checked_image_references ?? 0)}</strong></div>
+    <div class="fact"><span>Search ID</span><strong>${escapeHtml(shortHash(result.search_id))}</strong></div>
+  </div>
+  <div class="photo-proof-network"><span>Cryptographic Proof</span><strong>${receipt ? "Tamper-Evident SHA-256 Blockchain Commitment" : "Not created"}</strong></div>
+  ${receipt ? `<div class="label-warning">BLOCK ${escapeHtml(receipt.block_index)} · COMMITMENT ${escapeHtml(shortHash(receipt.block_hash))} · ${escapeHtml(receipt.network)} · Cryptographically sealed proof of discovery.</div>` : ""}
+  ${evmReceipt ? `
+    <div class="evm-blockchain-badge" style="margin-top: 0.75rem; padding: 0.75rem 1rem; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 8px;">
+      <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #3b82f6;"></span>
+          <strong style="color: #93c5fd;">${escapeHtml(evmReceipt.network || "Ethereum Sepolia")}</strong>
+          <span style="color: var(--text-secondary); font-size: 0.85rem;">Block #${escapeHtml(evmReceipt.block_number ?? "Mined")}</span>
+        </div>
+        <a href="${escapeHtml(evmReceipt.explorer_url)}" target="_blank" rel="noopener noreferrer" style="color: #60a5fa; text-decoration: underline; font-family: monospace; font-size: 0.85rem;">
+          Tx: ${escapeHtml(shortHash(evmReceipt.transaction_hash))} ↗
+        </a>
+      </div>
+    </div>
+  ` : ""}
     ${matches.length ? `<div class="proof-actions"><button id="photo-verify-button" class="button button-primary" type="button">Verify Proof On-Chain</button><button id="photo-tamper-button" class="button button-ghost" type="button">Simulate Tamper Test</button><button id="photo-download-button" class="button button-ghost" type="button">Download Evidence (.zip)</button></div><div id="photo-proof-message" class="inline-message hidden"></div>` : ""}</section>`;
 
   if (matches.length) {

@@ -897,25 +897,44 @@ class OpenCVFaceBackend:
         self,
         image: Any,
         *,
-        min_confidence: float = 0.50,
+        min_confidence: float = 0.40,
     ) -> tuple[FaceEncoding, ...]:
         """Encode faces in a candidate image without rejecting lower-resolution web thumbnails.
 
         Used for candidate avatars and search results where faces may be smaller or compressed,
         but SFace can still extract accurate discriminative embeddings.
+        Supports multi-scale upscaling for small thumbnails (e.g. 200x200).
         """
         with self._lock:
             prepared = self._coerce_image(image)
+            working_image = prepared
             detections = self._detect_prepared(prepared)
-            if not detections:
+            usable_detections = [d for d in detections if d.confidence >= min_confidence]
+
+            cv2 = self._cv2
+            if (not usable_detections or min(prepared.shape[:2]) <= 320) and cv2 is not None:
+                h, w = prepared.shape[:2]
+                scale = 2.0 if max(h, w) <= 400 else 1.5
+                target_w, target_h = int(w * scale), int(h * scale)
+                if target_w * target_h <= MAX_DECODED_IMAGE_PIXELS:
+                    upscaled = cv2.resize(
+                        prepared, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4
+                    )
+                    upscaled_detections = self._detect_prepared(upscaled)
+                    upscaled_usable = [
+                        d for d in upscaled_detections if d.confidence >= min_confidence
+                    ]
+                    if len(upscaled_usable) > len(usable_detections):
+                        working_image = upscaled
+                        usable_detections = upscaled_usable
+
+            if not usable_detections:
                 return ()
             encodings: list[FaceEncoding] = []
-            for detection in detections:
-                if detection.confidence < min_confidence:
-                    continue
+            for detection in usable_detections:
                 try:
-                    metrics = self._measure_quality(prepared, detection)
-                    encodings.append(self._encode_detection(prepared, detection, metrics))
+                    metrics = self._measure_quality(working_image, detection)
+                    encodings.append(self._encode_detection(working_image, detection, metrics))
                 except Exception:
                     continue
             return tuple(encodings)
@@ -924,7 +943,7 @@ class OpenCVFaceBackend:
         self,
         image: Any,
         *,
-        min_confidence: float = 0.50,
+        min_confidence: float = 0.40,
     ) -> FaceEncoding:
         """Encode the primary (largest/most prominent) detected face in an image.
 
@@ -933,15 +952,34 @@ class OpenCVFaceBackend:
         """
         with self._lock:
             prepared = self._coerce_image(image)
+            working_image = prepared
             detections = self._detect_prepared(prepared)
-            if not detections:
-                raise NoFaceError("no face detected")
             usable = [d for d in detections if d.confidence >= min_confidence]
-            if not usable:
+
+            cv2 = self._cv2
+            if not usable and cv2 is not None:
+                h, w = prepared.shape[:2]
+                scale = 2.0 if max(h, w) <= 400 else 1.5
+                target_w, target_h = int(w * scale), int(h * scale)
+                if target_w * target_h <= MAX_DECODED_IMAGE_PIXELS:
+                    upscaled = cv2.resize(
+                        prepared, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4
+                    )
+                    upscaled_detections = self._detect_prepared(upscaled)
+                    upscaled_usable = [
+                        d for d in upscaled_detections if d.confidence >= min_confidence
+                    ]
+                    if upscaled_usable:
+                        working_image = upscaled
+                        usable = upscaled_usable
+
+            if not usable and detections:
                 usable = list(detections)
+            if not usable:
+                raise NoFaceError("no face detected")
             best_detection = max(usable, key=lambda d: d.box.area * d.confidence)
-            metrics = self._measure_quality(prepared, best_detection)
-            return self._encode_detection(prepared, best_detection, metrics)
+            metrics = self._measure_quality(working_image, best_detection)
+            return self._encode_detection(working_image, best_detection, metrics)
 
     @staticmethod
     def similarity(left: Iterable[float], right: Iterable[float]) -> float:

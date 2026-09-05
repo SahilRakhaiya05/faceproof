@@ -28,13 +28,29 @@ from fastapi.responses import FileResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from .capture import CaptureError, materialize_candidate_image
+from .chain import (
+    anchor_calldata_transaction,
+    anchor_commitment,
+    explorer_url_for_tx,
+    network_name_for_chain_id,
+)
 from .config import Settings
 from .face import FaceError, FaceQualityError, OpenCVFaceBackend, cosine_similarity
 from .photo_chain import PhotoChain, PhotoChainError
 from .photo_copy import PhotoInputError, compare_photos, normalize_photo
-from .search.base import classify_domain, is_social_post_url, redact_url_secrets
+from .search.base import (
+    classify_domain,
+    is_social_post_url,
+    is_social_profile_url,
+    redact_url_secrets,
+)
 from .search.serpapi import SerpApiLensProvider
-from .search.tech_discovery import discover_tech_profiles, extract_identity_seeds
+from .search.tech_discovery import (
+    discover_tech_profiles,
+    extract_identity_seeds,
+    extract_name_tokens,
+    is_profile_consistent_with_subject,
+)
 
 MAX_BYTES = 25 * 1024 * 1024
 MAX_CANDIDATES = 48
@@ -271,8 +287,13 @@ def run_photo_search(
     }
     _write(run_dir / "provider.json", provider_record)
     candidates = list(found.candidates)
+    subject_tokens: set[str] = set()
     try:
         seed_handles, seed_names = extract_identity_seeds(candidates, found.web_labels)
+        for name in seed_names:
+            subject_tokens.update(extract_name_tokens(name))
+        for h in seed_handles:
+            subject_tokens.update(extract_name_tokens(h.replace("-", " ").replace("_", " ")))
         if seed_handles or seed_names:
             emit(
                 "Running deep tech discovery across Devfolio, Hugging Face, GitHub & tech networks."
@@ -283,8 +304,13 @@ def run_photo_search(
             )
             for tp in tech_profiles:
                 candidates.append(tp.to_candidate(rank=0))
+                if tp.name:
+                    subject_tokens.update(extract_name_tokens(tp.name))
     except Exception:
         pass
+    for c in candidates[:2]:
+        if c.title and c.rank <= 2:
+            subject_tokens.update(extract_name_tokens(c.title))
     candidates.sort(key=_candidate_priority)
     emit(f"Search returned {len(candidates)} image references; checking up to {MAX_CANDIDATES}.")
     matches: list[dict[str, Any]] = []
@@ -418,6 +444,19 @@ def run_photo_search(
                 reference["classification"] = "checked-unconfirmed"
                 continue
 
+            # Identity Consistency Gate: verify profile URL belongs to subject
+            if not is_profile_consistent_with_subject(url, candidate.title, subject_tokens):
+                reference["classification"] = "third-party-mention"
+                reference["third_party_reference"] = True
+                reference["face_match"] = False
+                continue
+
+            if face_matched and face_similarity >= 0.75:
+                subject_tokens.update(extract_name_tokens(candidate.title or ""))
+                subject_tokens.update(
+                    extract_name_tokens(urlsplit(url).path.replace("-", " ").replace("_", " "))
+                )
+
             reference["classification"] = "confirmed-copy"
             if is_verified_developer and face_matched:
                 reference["match_type"] = "developer_face_match"
@@ -450,6 +489,18 @@ def run_photo_search(
         except (CaptureError, PhotoInputError, OSError, ValueError):
             reference["classification"] = "unavailable"
             unavailable += 1
+    if subject_tokens:
+        clean_matches: list[dict[str, Any]] = []
+        for m in matches:
+            if is_social_profile_url(m["url"]) and not is_profile_consistent_with_subject(
+                m["url"], m.get("title"), subject_tokens
+            ):
+                m["classification"] = "third-party-mention"
+                m["face_match"] = False
+                continue
+            clean_matches.append(m)
+        matches = clean_matches
+
     matches.sort(
         key=lambda item: (
             item.get("face_match", False),
@@ -485,17 +536,54 @@ def run_photo_search(
         "claim": "Whole-photo copies; page associations supplied by search; no identity claim.",
     }
     _write(run_dir / "manifest.json", manifest, canonical=True)
+    manifest_bytes = (run_dir / "manifest.json").read_bytes()
+    manifest_digest = _digest(manifest_bytes)
     result = {**manifest, "status": "no-copies", "receipt": None}
     if matches:
-        emit(f"Found {len(matches)} photo-copy links. Recording the evidence fingerprint.")
+        emit(f"Found {len(matches)} confirmed matching links. Recording evidence fingerprint.")
         chain = PhotoChain(run_dir.parent / "chain.sqlite3")
-        receipt = chain.anchor(_digest((run_dir / "manifest.json").read_bytes()))
+        receipt = chain.anchor(manifest_digest)
         _write(run_dir / "receipt.json", receipt)
         verification = verify_photo_run(run_dir)
         if not verification["passed"]:
             raise PhotoChainError("Recorded photo evidence did not pass independent read-back")
         result.update(status="recorded", receipt=receipt, verification=verification)
         emit("Local simulated blockchain record verified against the saved evidence.")
+
+        # Real EVM Blockchain Anchoring (Ethereum Sepolia / Base Sepolia)
+        if settings.private_key:
+            try:
+                emit(f"Anchoring evidence on EVM blockchain (Chain ID {settings.chain_id})...")
+                if settings.contract_address:
+                    anchor = anchor_commitment(
+                        manifest_digest,
+                        rpc_url=settings.rpc_url,
+                        expected_chain_id=settings.chain_id,
+                        contract_address=settings.contract_address,
+                        private_key=settings.private_key,
+                        confirmations=settings.confirmations,
+                        timeout_seconds=min(settings.http_timeout_seconds, 60),
+                    )
+                    evm_receipt = {
+                        **anchor.to_dict(),
+                        "network": network_name_for_chain_id(settings.chain_id),
+                        "explorer_url": explorer_url_for_tx(
+                            settings.chain_id, anchor.transaction_hash
+                        ),
+                    }
+                else:
+                    evm_receipt = anchor_calldata_transaction(
+                        manifest_digest,
+                        rpc_url=settings.rpc_url,
+                        expected_chain_id=settings.chain_id,
+                        private_key=settings.private_key,
+                        timeout_seconds=min(settings.http_timeout_seconds, 60),
+                    )
+                _write(run_dir / "evm_receipt.json", evm_receipt)
+                result["evm_receipt"] = evm_receipt
+                emit(f"Anchored on {evm_receipt['network']}! Tx: {evm_receipt['transaction_hash']}")
+            except Exception as exc:
+                emit(f"EVM anchor notice: {type(exc).__name__}. Local cryptographic chain active.")
     else:
         emit("No downloadable whole-photo copy passed comparison. No block was created.")
     _write(run_dir / "result.json", result)
@@ -631,10 +719,17 @@ def register_photo_routes(
 
     @app.get("/api/photos/status")
     async def photo_status() -> dict[str, Any]:
+        chain_label = (
+            f"{network_name_for_chain_id(settings.chain_id)} EVM Blockchain"
+            if settings.private_key
+            else "Local simulated SHA-256 blockchain"
+        )
         return {
             "search_configured": bool(settings.serpapi_api_key),
             "search_mode": "web image-copy search · 1 credit per run",
-            "chain": "Local simulated SHA-256 blockchain",
+            "chain": chain_label,
+            "evm_enabled": bool(settings.private_key),
+            "chain_id": settings.chain_id if settings.private_key else None,
         }
 
     @app.post("/api/photos")

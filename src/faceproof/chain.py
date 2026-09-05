@@ -1052,3 +1052,121 @@ def _redacted_rpc_url(rpc_url: str) -> str:
         return f"{parsed.scheme}://{host}{port}"
     except (TypeError, ValueError):
         return "<configured-rpc>"
+
+
+def explorer_url_for_tx(chain_id: int, tx_hash: str) -> str:
+    """Return a public blockchain block-explorer URL for the transaction."""
+    tx = tx_hash if tx_hash.startswith("0x") else f"0x{tx_hash}"
+    if chain_id == 11155111:
+        return f"https://sepolia.etherscan.io/tx/{tx}"
+    if chain_id == 84532:
+        return f"https://sepolia.basescan.org/tx/{tx}"
+    if chain_id == 1:
+        return f"https://etherscan.io/tx/{tx}"
+    if chain_id == 8453:
+        return f"https://basescan.org/tx/{tx}"
+    return f"https://sepolia.etherscan.io/tx/{tx}"
+
+
+def network_name_for_chain_id(chain_id: int) -> str:
+    """Return a human-readable network label for known EVM chains."""
+    if chain_id == 11155111:
+        return "Ethereum Sepolia"
+    if chain_id == 84532:
+        return "Base Sepolia"
+    if chain_id == 1:
+        return "Ethereum Mainnet"
+    if chain_id == 8453:
+        return "Base Mainnet"
+    return f"EVM Chain {chain_id}"
+
+
+def anchor_calldata_transaction(
+    commitment: str | bytes,
+    *,
+    rpc_url: str,
+    expected_chain_id: int,
+    private_key: str,
+    timeout_seconds: float = 60,
+) -> dict[str, Any]:
+    """Anchor an evidence commitment as direct EVM transaction calldata.
+
+    Enables real public blockchain proofs (e.g. Ethereum Sepolia) without requiring
+    a pre-deployed smart contract.
+    """
+    commitment_bytes = parse_bytes32(commitment)
+    _require_positive_int(expected_chain_id, "expected_chain_id")
+    _require_positive_number(timeout_seconds, "timeout_seconds")
+
+    rpc_label = _redacted_rpc_url(rpc_url)
+    try:
+        web3 = make_web3(rpc_url, timeout_seconds=min(timeout_seconds, 30))
+        connected = web3.is_connected()
+        actual_chain_id = int(web3.eth.chain_id) if connected else 0
+    except Exception as exc:
+        raise ChainError(f"Could not connect to RPC {rpc_label} ({type(exc).__name__})") from exc
+    if not connected:
+        raise ChainError(f"Could not connect to RPC {rpc_label}")
+    if actual_chain_id != expected_chain_id:
+        raise ChainError(
+            f"Wrong chain: RPC returned {actual_chain_id}, expected {expected_chain_id}"
+        )
+
+    try:
+        account = web3.eth.account.from_key(private_key)
+    except Exception as exc:
+        raise ChainError("FACEPROOF_PRIVATE_KEY is not a valid EVM private key") from exc
+
+    try:
+        nonce = int(web3.eth.get_transaction_count(account.address, "pending"))
+        latest = web3.eth.get_block("latest")
+        fee_fields = _bounded_fee_fields(web3, latest)
+    except Exception as exc:
+        raise ChainError(
+            f"Could not prepare anchor transaction via {rpc_label} ({type(exc).__name__})"
+        ) from exc
+
+    tx: dict[str, Any] = {
+        "from": account.address,
+        "to": account.address,
+        "value": 0,
+        "nonce": nonce,
+        "chainId": actual_chain_id,
+        "gas": 40_000,
+        "data": commitment_bytes,
+        **fee_fields,
+    }
+
+    try:
+        signed = account.sign_transaction(tx)
+        raw_tx = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+        tx_hash_bytes = web3.eth.send_raw_transaction(raw_tx)
+        tx_hash = (
+            tx_hash_bytes.hex() if hasattr(tx_hash_bytes, "hex") else Web3.to_hex(tx_hash_bytes)
+        )
+        receipt = web3.eth.wait_for_transaction_receipt(tx_hash_bytes, timeout=timeout_seconds)
+        block_number = int(receipt["blockNumber"])
+        block_hash_raw = receipt["blockHash"]
+        block_hash = (
+            block_hash_raw.hex() if hasattr(block_hash_raw, "hex") else Web3.to_hex(block_hash_raw)
+        )
+        tx_status = int(receipt.get("status", 1))
+    except Exception as exc:
+        raise ChainError(
+            f"Could not broadcast or confirm calldata anchor ({type(exc).__name__})"
+        ) from exc
+
+    final_tx_hash = tx_hash if tx_hash.startswith("0x") else f"0x{tx_hash}"
+    final_block_hash = block_hash if block_hash.startswith("0x") else f"0x{block_hash}"
+    return {
+        "schema": RECEIPT_SCHEMA,
+        "chain_id": actual_chain_id,
+        "network": network_name_for_chain_id(actual_chain_id),
+        "transaction_hash": final_tx_hash,
+        "block_number": block_number,
+        "block_hash": final_block_hash,
+        "transaction_status": tx_status,
+        "submitter": Web3.to_checksum_address(account.address),
+        "commitment": bytes32_hex(commitment_bytes),
+        "explorer_url": explorer_url_for_tx(actual_chain_id, final_tx_hash),
+    }

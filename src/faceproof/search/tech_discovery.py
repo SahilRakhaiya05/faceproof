@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from .base import SearchCandidate, normalize_page_url
+from .base import SearchCandidate, is_social_profile_url, normalize_page_url
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +105,84 @@ def extract_identity_seeds(
                 expanded_handles.add(stripped)
 
     return expanded_handles, names
+
+
+def extract_name_tokens(text: str) -> set[str]:
+    """Extract individual lower-cased name tokens, filtering platform noise words."""
+    noise = {
+        "github",
+        "linkedin",
+        "x",
+        "twitter",
+        "devfolio",
+        "huggingface",
+        "profile",
+        "posts",
+        "photos",
+        "videos",
+        "activity",
+        "overview",
+        "machine",
+        "learning",
+        "artificial",
+        "intelligence",
+        "developer",
+        "engineer",
+        "software",
+        "student",
+        "at",
+        "in",
+        "and",
+        "the",
+        "for",
+        "with",
+        "dr",
+        "mr",
+        "ms",
+        "mrs",
+        "prof",
+        "com",
+        "https",
+        "http",
+        "www",
+    }
+    words = re.findall(r"[a-zA-Z]{2,}", text.lower())
+    return {w for w in words if w not in noise}
+
+
+def is_profile_consistent_with_subject(
+    url: str,
+    title: str | None,
+    subject_tokens: set[str],
+) -> bool:
+    """Verify that a candidate personal profile URL belongs to the target subject.
+
+    Rejects third-party profile pages (e.g. colleagues, sidebar connections, commenters)
+    where the target's photo appeared from being falsely presented as the target's identity.
+    """
+    if not subject_tokens:
+        return True
+    if not is_social_profile_url(url):
+        return True
+
+    title_text = title or ""
+    title_tokens = extract_name_tokens(title_text)
+    parts = urlsplit(url)
+    handle_tokens = extract_name_tokens(parts.path.replace("-", " ").replace("_", " "))
+    cand_tokens = title_tokens | handle_tokens
+
+    # Direct token overlap
+    if cand_tokens & subject_tokens:
+        return True
+
+    # Substring in title or handle path
+    full_str = f"{title_text.lower()} {parts.path.lower()}"
+    for st in subject_tokens:
+        if len(st) >= 3 and st in full_str:
+            return True
+
+    # If the candidate profile has identified tokens belonging to someone else, reject
+    return not cand_tokens
 
 
 def discover_tech_profiles(
